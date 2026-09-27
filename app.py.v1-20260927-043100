@@ -1,0 +1,1222 @@
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
+
+
+APP_DIR = Path("/root/loop-video-audio")
+DATA_DIR = Path("/var/lib/loop-video-audio/jobs")
+
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
+
+app = FastAPI(title="Loop Video + Audio")
+
+
+HTML = r"""
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Loop Video + Audio</title>
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:#0b0d10;
+  color:#f5f5f5;
+  font-family:Inter,system-ui,-apple-system,sans-serif;
+}
+.wrap{
+  max-width:760px;
+  margin:50px auto;
+  padding:20px;
+}
+.card{
+  background:#15181d;
+  border:1px solid #292d34;
+  border-radius:18px;
+  padding:26px;
+}
+h1{margin:0 0 8px;font-size:28px}
+.sub{color:#9299a3;margin-bottom:28px}
+.field{margin:20px 0}
+label{
+  display:block;
+  margin-bottom:9px;
+  font-weight:600;
+}
+input[type=file]{
+  width:100%;
+  padding:14px;
+  border:1px dashed #454b55;
+  border-radius:12px;
+  background:#0f1115;
+  color:#ddd;
+}
+button{
+  width:100%;
+  border:0;
+  border-radius:12px;
+  padding:15px 18px;
+  font-size:16px;
+  font-weight:700;
+  cursor:pointer;
+  background:#fff;
+  color:#111;
+  margin-top:12px;
+}
+button:disabled{
+  opacity:.5;
+  cursor:not-allowed;
+}
+.info{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:12px;
+  margin-top:22px;
+}
+.box{
+  background:#0f1115;
+  border:1px solid #292d34;
+  border-radius:12px;
+  padding:14px;
+}
+.box small{color:#858d98}
+.box strong{display:block;margin-top:5px}
+
+.render-runtime{
+  display:none;
+  align-items:center;
+  gap:12px;
+  margin-top:22px;
+  padding:14px;
+  border:1px solid #292d34;
+  background:#0f1115;
+  border-radius:12px;
+}
+
+.spinner{
+  width:22px;
+  height:22px;
+  flex:0 0 22px;
+  border:3px solid #343941;
+  border-top-color:#fff;
+  border-radius:50%;
+  animation:spin .8s linear infinite;
+}
+
+.runtime-main{
+  font-weight:700;
+  font-size:14px;
+}
+
+.runtime-detail{
+  margin-top:4px;
+  color:#9299a3;
+  font-size:13px;
+}
+
+@keyframes spin{
+  to{transform:rotate(360deg)}
+}
+
+.progress{
+  height:9px;
+  overflow:hidden;
+  border-radius:50px;
+  background:#272b31;
+  margin-top:20px;
+}
+.bar{
+  width:0%;
+  height:100%;
+  background:#fff;
+  transition:width .4s;
+}
+#status{
+  color:#b7bec8;
+  margin-top:12px;
+  min-height:24px;
+}
+.download{
+  display:none;
+  text-align:center;
+  margin-top:15px;
+  padding:14px;
+  color:#fff;
+  border:1px solid #454b55;
+  border-radius:12px;
+  text-decoration:none;
+}
+.error{color:#ff7979!important}
+@media(max-width:600px){
+  .wrap{margin:10px auto}
+  .info{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Loop Video + Audio</h1>
+    <div class="sub">
+      Lặp video ngắn đến khi audio kết thúc và xuất thành một video hoàn chỉnh.
+    </div>
+
+    <div class="field">
+      <label>1. Video tĩnh / video loop</label>
+      <input id="video" type="file" accept="video/*">
+    </div>
+
+    <div class="field">
+      <label>2. Audio MP3 / M4A / WAV</label>
+      <input id="audio" type="file">
+    </div>
+
+    <button id="render">CREATE VIDEO</button>
+
+    <div class="info">
+      <div class="box">
+        <small>Video</small>
+        <strong id="videoInfo">Chưa chọn</strong>
+      </div>
+      <div class="box">
+        <small>Audio</small>
+        <strong id="audioInfo">Chưa chọn</strong>
+      </div>
+    </div>
+
+    <div id="renderRuntime" class="render-runtime">
+      <div id="spinner" class="spinner"></div>
+      <div>
+        <div id="runtimeMain" class="runtime-main">
+          Đang chuẩn bị...
+        </div>
+        <div id="runtimeDetail" class="runtime-detail">
+          Runtime 00:00:00
+        </div>
+      </div>
+    </div>
+
+    <div class="progress">
+      <div id="bar" class="bar"></div>
+    </div>
+
+    <div id="status">Sẵn sàng.</div>
+
+    <a id="download" class="download">
+      DOWNLOAD VIDEO
+    </a>
+  </div>
+</div>
+
+<script>
+const video = document.getElementById("video");
+const audio = document.getElementById("audio");
+const renderBtn = document.getElementById("render");
+const statusEl = document.getElementById("status");
+const bar = document.getElementById("bar");
+const download = document.getElementById("download");
+const renderRuntime = document.getElementById("renderRuntime");
+const runtimeMain = document.getElementById("runtimeMain");
+const runtimeDetail = document.getElementById("runtimeDetail");
+const spinner = document.getElementById("spinner");
+
+video.onchange = () => {
+  document.getElementById("videoInfo").textContent =
+    video.files[0] ? formatSize(video.files[0].size) : "Chưa chọn";
+};
+
+audio.onchange = () => {
+  document.getElementById("audioInfo").textContent =
+    audio.files[0] ? formatSize(audio.files[0].size) : "Chưa chọn";
+};
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + " KB";
+  if (bytes < 1024*1024*1024) return (bytes/1024/1024).toFixed(1) + " MB";
+  return (bytes/1024/1024/1024).toFixed(2) + " GB";
+}
+
+function setStatus(text, isError=false) {
+  statusEl.textContent = text;
+  statusEl.className = isError ? "error" : "";
+}
+
+async function poll(jobId) {
+  for (;;) {
+    const res = await fetch(`/api/jobs/${jobId}`, {
+      cache: "no-store"
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.detail || "Không lấy được trạng thái");
+    }
+
+    const progress =
+      typeof data.progress === "number"
+        ? Math.max(0, Math.min(100, data.progress))
+        : 0;
+
+    bar.style.width = progress + "%";
+
+    renderRuntime.style.display = "flex";
+
+    const elapsed = data.elapsed_text || "00:00:00";
+    const eta = data.eta_text || "--:--:--";
+
+    if (data.status === "done") {
+      bar.style.width = "100%";
+
+      spinner.style.display = "none";
+
+      runtimeMain.textContent = "Hoàn tất 100%";
+
+      runtimeDetail.textContent =
+        `Runtime ${elapsed} • Output ${data.output_duration_text || data.audio_duration_text || ""}`;
+
+      setStatus(
+        `Hoàn tất • Video ${data.video_duration_text} • Audio ${data.audio_duration_text}`
+      );
+
+      download.href = `/api/jobs/${jobId}/download`;
+      download.style.display = "block";
+      renderBtn.disabled = false;
+      return;
+    }
+
+    if (data.status === "failed") {
+      spinner.style.display = "none";
+      runtimeMain.textContent = "Render thất bại";
+      runtimeDetail.textContent = `Runtime ${elapsed}`;
+
+      throw new Error(data.error || "Render thất bại");
+    }
+
+    spinner.style.display = "block";
+
+    runtimeMain.textContent =
+      `Đang render ${progress.toFixed(1)}%`;
+
+    let detail = `Runtime ${elapsed}`;
+
+    if (data.rendered_time_text && data.audio_duration_text) {
+      detail +=
+        ` • Đã render ${data.rendered_time_text} / ${data.audio_duration_text}`;
+    }
+
+    if (data.eta_seconds !== null &&
+        data.eta_seconds !== undefined &&
+        data.eta_seconds >= 0) {
+      detail += ` • ETA ${eta}`;
+    }
+
+    runtimeDetail.textContent = detail;
+
+    setStatus(data.message || "Đang xử lý...");
+
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
+renderBtn.onclick = async () => {
+  download.style.display = "none";
+  statusEl.className = "";
+
+  if (!video.files[0]) {
+    setStatus("Chưa chọn video.", true);
+    return;
+  }
+
+  if (!audio.files[0]) {
+    setStatus("Chưa chọn audio.", true);
+    return;
+  }
+
+  renderBtn.disabled = true;
+
+  spinner.style.display = "block";
+  renderRuntime.style.display = "flex";
+
+  runtimeMain.textContent = "Đang upload...";
+  runtimeDetail.textContent = "Runtime 00:00:00";
+
+  bar.style.width = "2%";
+  setStatus("Đang upload...");
+
+  const form = new FormData();
+  form.append("video", video.files[0]);
+  form.append("audio", audio.files[0]);
+
+  try {
+    const res = await fetch("/api/render", {
+      method: "POST",
+      body: form
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.detail || "Không tạo được job");
+    }
+
+    bar.style.width = "5%";
+    setStatus("Upload hoàn tất. Đang kiểm tra media...");
+    await poll(data.job_id);
+
+  } catch (err) {
+    bar.style.width = "0%";
+    setStatus(err.message || "Có lỗi xảy ra", true);
+    renderBtn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>
+"""
+
+
+def run_command(command: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+
+def probe_duration(path: Path) -> float:
+    result = run_command([
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ])
+
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "ffprobe failed")
+
+    value = result.stdout.strip()
+
+    if not value:
+        raise RuntimeError("Không đọc được duration")
+
+    duration = float(value)
+
+    if duration <= 0:
+        raise RuntimeError("Duration không hợp lệ")
+
+    return duration
+
+
+def probe_video_codec(path: Path) -> str:
+    result = run_command([
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ])
+
+    if result.returncode != 0:
+        return ""
+
+    return result.stdout.strip().lower()
+
+
+def format_duration(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def write_state(job_dir: Path, data: dict) -> None:
+    state_file = job_dir / "state.json"
+    temp_file = job_dir / "state.tmp"
+
+    temp_file.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    temp_file.replace(state_file)
+
+
+def read_state(job_dir: Path) -> dict:
+    state_file = job_dir / "state.json"
+
+    if not state_file.exists():
+        raise FileNotFoundError
+
+    return json.loads(state_file.read_text(encoding="utf-8"))
+
+
+def render_with_stream_copy(
+    video_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    audio_duration: float,
+) -> subprocess.CompletedProcess:
+
+    return run_command([
+        "ffmpeg",
+        "-y",
+        "-stream_loop", "-1",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-t", f"{audio_duration:.6f}",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-ar", "48000",
+        "-movflags", "+faststart",
+        "-avoid_negative_ts", "make_zero",
+        str(output_path),
+    ])
+
+
+def render_with_h264(
+    video_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    audio_duration: float,
+) -> subprocess.CompletedProcess:
+
+    return run_command([
+        "ffmpeg",
+        "-y",
+        "-stream_loop", "-1",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-t", f"{audio_duration:.6f}",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-ar", "48000",
+        "-movflags", "+faststart",
+        str(output_path),
+    ])
+
+
+
+def seconds_from_ffmpeg_time(value: str) -> float:
+    parts = value.strip().split(":")
+
+    if len(parts) != 3:
+        return 0.0
+
+    try:
+        hours = float(parts[0])
+        minutes = float(parts[1])
+        seconds = float(parts[2])
+    except ValueError:
+        return 0.0
+
+    return (hours * 3600) + (minutes * 60) + seconds
+
+
+def ffmpeg_log_tail(log_path: Path, limit: int = 6000) -> str:
+    if not log_path.exists():
+        return ""
+
+    try:
+        text = log_path.read_text(
+            encoding="utf-8",
+            errors="replace"
+        )
+    except Exception:
+        return ""
+
+    return text[-limit:]
+
+
+def run_ffmpeg_progress(
+    command: list[str],
+    job_dir: Path,
+    state: dict,
+    audio_duration: float,
+    progress_start: float = 20.0,
+    progress_end: float = 98.0,
+    stage_name: str = "Đang render",
+) -> int:
+    if audio_duration <= 0:
+        raise RuntimeError("Audio duration không hợp lệ")
+
+    log_path = job_dir / "ffmpeg.log"
+
+    started = time.time()
+    last_state_write = 0.0
+
+    with log_path.open(
+        "a",
+        encoding="utf-8",
+        errors="replace",
+    ) as log_file:
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=log_file,
+            text=True,
+            bufsize=1,
+        )
+
+        if process.stdout is None:
+            process.kill()
+            raise RuntimeError(
+                "Không đọc được progress của FFmpeg"
+            )
+
+        rendered_seconds = 0.0
+
+        for raw_line in process.stdout:
+            line = raw_line.strip()
+
+            if not line:
+                continue
+
+            if "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+
+            if key == "out_time":
+                rendered_seconds = seconds_from_ffmpeg_time(value)
+
+            elif key == "out_time_us":
+                try:
+                    rendered_seconds = max(
+                        rendered_seconds,
+                        float(value) / 1_000_000
+                    )
+                except ValueError:
+                    pass
+
+            if rendered_seconds < 0:
+                rendered_seconds = 0
+
+            ratio = min(
+                1.0,
+                rendered_seconds / audio_duration
+            )
+
+            progress = (
+                progress_start
+                + ((progress_end - progress_start) * ratio)
+            )
+
+            elapsed = max(
+                0.0,
+                time.time() - started
+            )
+
+            eta = None
+
+            if ratio > 0.001:
+                eta = max(
+                    0.0,
+                    (elapsed / ratio) - elapsed
+                )
+
+            now = time.time()
+
+            if now - last_state_write < 0.5:
+                continue
+
+            last_state_write = now
+
+            state.update({
+                "status": "processing",
+                "progress": round(progress, 1),
+                "rendered_seconds": rendered_seconds,
+                "rendered_time_text": format_duration(
+                    rendered_seconds
+                ),
+                "eta_seconds": (
+                    round(eta, 1)
+                    if eta is not None
+                    else None
+                ),
+                "eta_text": (
+                    format_duration(eta)
+                    if eta is not None
+                    else None
+                ),
+                "message": (
+                    f"{stage_name} "
+                    f"{progress:.1f}%"
+                ),
+            })
+
+            write_state(job_dir, state)
+
+        return_code = process.wait()
+
+    return return_code
+
+
+def build_stream_copy_command(
+    video_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    audio_duration: float,
+) -> list[str]:
+
+    return [
+        "ffmpeg",
+        "-y",
+
+        "-stream_loop",
+        "-1",
+
+        "-i",
+        str(video_path),
+
+        "-i",
+        str(audio_path),
+
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "1:a:0",
+
+        "-t",
+        f"{audio_duration:.6f}",
+
+        "-c:v",
+        "copy",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "192k",
+
+        "-ar",
+        "48000",
+
+        "-movflags",
+        "+faststart",
+
+        "-avoid_negative_ts",
+        "make_zero",
+
+        "-progress",
+        "pipe:1",
+
+        "-nostats",
+
+        str(output_path),
+    ]
+
+
+def build_h264_command(
+    video_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    audio_duration: float,
+) -> list[str]:
+
+    return [
+        "ffmpeg",
+        "-y",
+
+        "-stream_loop",
+        "-1",
+
+        "-i",
+        str(video_path),
+
+        "-i",
+        str(audio_path),
+
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "1:a:0",
+
+        "-t",
+        f"{audio_duration:.6f}",
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "veryfast",
+
+        "-crf",
+        "20",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-c:a",
+        "aac",
+
+        "-b:a",
+        "192k",
+
+        "-ar",
+        "48000",
+
+        "-movflags",
+        "+faststart",
+
+        "-progress",
+        "pipe:1",
+
+        "-nostats",
+
+        str(output_path),
+    ]
+
+
+def process_job(job_id: str) -> None:
+    job_dir = DATA_DIR / job_id
+
+    try:
+        state = read_state(job_dir)
+
+        video_path = Path(state["video_path"])
+        audio_path = Path(state["audio_path"])
+        output_path = job_dir / "output.mp4"
+
+        render_started_at = time.time()
+
+        state.update({
+            "status": "processing",
+            "progress": 8,
+            "message": "Đang đọc thông tin video và audio...",
+            "render_started_at": render_started_at,
+            "eta_seconds": None,
+            "eta_text": None,
+            "rendered_seconds": 0,
+            "rendered_time_text": "00:00:00",
+        })
+
+        write_state(job_dir, state)
+
+        video_duration = probe_duration(video_path)
+        audio_duration = probe_duration(audio_path)
+
+        if video_duration <= 0:
+            raise RuntimeError(
+                "Video không có thời lượng hợp lệ"
+            )
+
+        if audio_duration <= 0:
+            raise RuntimeError(
+                "Audio không có thời lượng hợp lệ"
+            )
+
+        codec = probe_video_codec(video_path)
+
+        estimated_loops = max(
+            1,
+            int(audio_duration / video_duration) + 1
+        )
+
+        state.update({
+            "video_duration": video_duration,
+            "video_duration_text": format_duration(
+                video_duration
+            ),
+            "audio_duration": audio_duration,
+            "audio_duration_text": format_duration(
+                audio_duration
+            ),
+            "video_codec": codec,
+            "estimated_loops": estimated_loops,
+            "progress": 20,
+            "message": (
+                f"Đang render • "
+                f"{estimated_loops} vòng loop"
+            ),
+        })
+
+        write_state(job_dir, state)
+
+        command = build_stream_copy_command(
+            video_path,
+            audio_path,
+            output_path,
+            audio_duration,
+        )
+
+        return_code = run_ffmpeg_progress(
+            command=command,
+            job_dir=job_dir,
+            state=state,
+            audio_duration=audio_duration,
+            progress_start=20,
+            progress_end=98,
+            stage_name="Đang render",
+        )
+
+        if return_code != 0:
+            if output_path.exists():
+                output_path.unlink()
+
+            state.update({
+                "progress": 20,
+                "rendered_seconds": 0,
+                "rendered_time_text": "00:00:00",
+                "eta_seconds": None,
+                "eta_text": None,
+                "message": (
+                    "Codec nguồn không tương thích. "
+                    "Đang encode H.264..."
+                ),
+            })
+
+            write_state(job_dir, state)
+
+            command = build_h264_command(
+                video_path,
+                audio_path,
+                output_path,
+                audio_duration,
+            )
+
+            return_code = run_ffmpeg_progress(
+                command=command,
+                job_dir=job_dir,
+                state=state,
+                audio_duration=audio_duration,
+                progress_start=20,
+                progress_end=98,
+                stage_name="Đang encode H.264",
+            )
+
+        if return_code != 0:
+            error = ffmpeg_log_tail(
+                job_dir / "ffmpeg.log"
+            )
+
+            raise RuntimeError(
+                error or "FFmpeg render failed"
+            )
+
+        if not output_path.exists():
+            raise RuntimeError(
+                "FFmpeg không tạo output"
+            )
+
+        if output_path.stat().st_size <= 0:
+            raise RuntimeError(
+                "Output rỗng"
+            )
+
+        output_duration = probe_duration(
+            output_path
+        )
+
+        elapsed = max(
+            0.0,
+            time.time() - render_started_at
+        )
+
+        state.update({
+            "status": "done",
+            "progress": 100,
+            "message": "Hoàn tất.",
+            "output_path": str(output_path),
+            "output_duration": output_duration,
+            "output_duration_text": format_duration(
+                output_duration
+            ),
+            "output_size": output_path.stat().st_size,
+            "rendered_seconds": audio_duration,
+            "rendered_time_text": format_duration(
+                audio_duration
+            ),
+            "elapsed_seconds": elapsed,
+            "elapsed_text": format_duration(
+                elapsed
+            ),
+            "eta_seconds": 0,
+            "eta_text": "00:00:00",
+        })
+
+        write_state(job_dir, state)
+
+    except Exception as exc:
+        try:
+            state = read_state(job_dir)
+        except Exception:
+            state = {}
+
+        started_at = state.get(
+            "render_started_at"
+        )
+
+        elapsed = 0.0
+
+        if started_at:
+            elapsed = max(
+                0.0,
+                time.time() - float(started_at)
+            )
+
+        state.update({
+            "status": "failed",
+            "progress": 0,
+            "message": "Render thất bại.",
+            "error": str(exc),
+            "elapsed_seconds": elapsed,
+            "elapsed_text": format_duration(
+                elapsed
+            ),
+        })
+
+        write_state(job_dir, state)
+
+
+
+def safe_extension(filename: str | None, allowed: set[str]) -> str:
+    if not filename:
+        raise HTTPException(400, "Tên file không hợp lệ")
+
+    suffix = Path(filename).suffix.lower()
+
+    if suffix not in allowed:
+        raise HTTPException(
+            400,
+            f"Định dạng không hỗ trợ: {suffix or 'unknown'}"
+        )
+
+    return suffix
+
+
+def save_upload(upload: UploadFile, destination: Path) -> None:
+    with destination.open("wb") as output:
+        shutil.copyfileobj(upload.file, output, length=1024 * 1024)
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return HTML
+
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "service": "loop-video-audio",
+    }
+
+
+@app.post("/api/render")
+def create_render(
+    video: UploadFile = File(...),
+    audio: UploadFile = File(...),
+):
+    video_ext = safe_extension(video.filename, VIDEO_EXTENSIONS)
+    audio_ext = safe_extension(audio.filename, AUDIO_EXTENSIONS)
+
+    job_id = uuid.uuid4().hex
+    job_dir = DATA_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=False)
+
+    video_path = job_dir / f"input_video{video_ext}"
+    audio_path = job_dir / f"input_audio{audio_ext}"
+
+    try:
+        save_upload(video, video_path)
+        save_upload(audio, audio_path)
+    except Exception:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(500, "Không lưu được file upload")
+
+    if video_path.stat().st_size <= 0:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(400, "Video rỗng")
+
+    if audio_path.stat().st_size <= 0:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(400, "Audio rỗng")
+
+    state = {
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 5,
+        "message": "Đã nhận file. Đang chuẩn bị...",
+        "video_path": str(video_path),
+        "audio_path": str(audio_path),
+        "video_filename": video.filename,
+        "audio_filename": audio.filename,
+    }
+
+    write_state(job_dir, state)
+
+    threading.Thread(
+        target=process_job,
+        args=(job_id,),
+        daemon=True,
+    ).start()
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+    }
+
+
+@app.get("/api/jobs/{job_id}")
+def job_status(job_id: str):
+    job_dir = DATA_DIR / job_id
+
+    if not job_dir.exists():
+        raise HTTPException(
+            404,
+            "Job không tồn tại"
+        )
+
+    try:
+        state = read_state(job_dir)
+    except Exception:
+        raise HTTPException(
+            500,
+            "Không đọc được trạng thái job"
+        )
+
+    status = state.get("status")
+
+    elapsed_seconds = state.get(
+        "elapsed_seconds",
+        0
+    )
+
+    started_at = state.get(
+        "render_started_at"
+    )
+
+    if (
+        status == "processing"
+        and started_at
+    ):
+        elapsed_seconds = max(
+            0.0,
+            time.time() - float(started_at)
+        )
+
+    public_state = {
+        "job_id": state.get("job_id"),
+        "status": status,
+        "progress": state.get(
+            "progress",
+            0
+        ),
+        "message": state.get(
+            "message"
+        ),
+        "error": state.get(
+            "error"
+        ),
+
+        "video_duration": state.get(
+            "video_duration"
+        ),
+        "video_duration_text": state.get(
+            "video_duration_text"
+        ),
+
+        "audio_duration": state.get(
+            "audio_duration"
+        ),
+        "audio_duration_text": state.get(
+            "audio_duration_text"
+        ),
+
+        "rendered_seconds": state.get(
+            "rendered_seconds",
+            0
+        ),
+        "rendered_time_text": state.get(
+            "rendered_time_text",
+            "00:00:00"
+        ),
+
+        "elapsed_seconds": elapsed_seconds,
+        "elapsed_text": format_duration(
+            elapsed_seconds
+        ),
+
+        "eta_seconds": state.get(
+            "eta_seconds"
+        ),
+        "eta_text": state.get(
+            "eta_text"
+        ),
+
+        "output_duration": state.get(
+            "output_duration"
+        ),
+        "output_duration_text": state.get(
+            "output_duration_text"
+        ),
+
+        "estimated_loops": state.get(
+            "estimated_loops"
+        ),
+
+        "video_codec": state.get(
+            "video_codec"
+        ),
+
+        "output_size": state.get(
+            "output_size"
+        ),
+    }
+
+    return public_state
+
+
+@app.get("/api/jobs/{job_id}/download")
+def download(job_id: str):
+    job_dir = DATA_DIR / job_id
+
+    if not job_dir.exists():
+        raise HTTPException(404, "Job không tồn tại")
+
+    state = read_state(job_dir)
+
+    if state.get("status") != "done":
+        raise HTTPException(409, "Video chưa render xong")
+
+    output_path = job_dir / "output.mp4"
+
+    if not output_path.exists():
+        raise HTTPException(404, "Không tìm thấy output")
+
+    return FileResponse(
+        output_path,
+        media_type="video/mp4",
+        filename=f"looped-{job_id[:8]}.mp4",
+    )
