@@ -954,7 +954,7 @@ input[type=range]{
 
 
 
-                <div id="driveAuthPanel" class="box" style="margin-top:12px;">
+                <div id="colabPanel" class="box" style="margin-top:12px;">
                     <div style="display:flex; justify-content:space-between; align-items:center;">
                         <strong>Colab</strong>
                         <span id="colabStatusBadge" class="badge bg-secondary">Checking...</span>
@@ -2425,8 +2425,9 @@ function showStage2(
             ""
         }`;
 
-    downloadV1.href =
-        `/api/jobs/${jobId}/download`;
+    if (downloadV1) {
+        downloadV1.href = `/api/jobs/${jobId}/download`;
+    }
 
     refreshMusicUI();
 
@@ -4050,7 +4051,7 @@ function attachLogoGestures() {
 
             try {
                 el.setPointerCapture(e.pointerId);
-            } catch (_) {}
+            } catch(_) { console.error(_); }
 
             logoPointers.set(e.pointerId, {
                 x: e.clientX,
@@ -4372,7 +4373,7 @@ document.getElementById("logoDelete")?.addEventListener(
                 `/api/jobs/${currentJobId}/logo`,
                 {method: "DELETE"}
             );
-        } catch (_) {}
+        } catch(_) { console.error(_); }
 
         logoCfg.uploaded = false;
         logoCfg.enabled = false;
@@ -4949,18 +4950,32 @@ async function pollDriveAuth() {
 document.getElementById("btnConnectDrive")?.addEventListener("click", async () => {
     document.getElementById("btnConnectDrive").disabled = true;
     try {
-        await fetch("/api/colab/drive/auth/start", {method: "POST"});
+        const res = await fetch("/api/colab/drive/auth/start", {method: "POST"});
+        if (!res.ok) {
+            const data = await res.json().catch(()=>({}));
+            alert("Lỗi kết nối: " + (data.detail || res.statusText));
+        }
         refreshSubtitleRuntimeStatus();
-    } catch(e) {}
+    } catch(e) {
+        console.error(e);
+        alert("Lỗi kết nối Drive: " + e.message);
+    }
     document.getElementById("btnConnectDrive").disabled = false;
 });
 
 document.getElementById("btnConfirmAuth")?.addEventListener("click", async () => {
     document.getElementById("btnConfirmAuth").disabled = true;
     try {
-        await fetch("/api/colab/drive/auth/confirm", {method: "POST"});
+        const res = await fetch("/api/colab/drive/auth/confirm", {method: "POST"});
+        if (!res.ok) {
+            const data = await res.json().catch(()=>({}));
+            alert("Lỗi xác nhận: " + (data.detail || res.statusText));
+        }
         refreshSubtitleRuntimeStatus();
-    } catch(e) {}
+    } catch(e) {
+        console.error(e);
+        alert("Lỗi xác nhận Drive: " + e.message);
+    }
     document.getElementById("btnConfirmAuth").disabled = false;
 });
 
@@ -4968,7 +4983,7 @@ document.getElementById("btnCancelAuth")?.addEventListener("click", async () => 
     try {
         await fetch("/api/colab/drive/auth/cancel", {method: "POST"});
         refreshSubtitleRuntimeStatus();
-    } catch(e) {}
+    } catch(e) { console.error(e); }
 });
 
 
@@ -5191,7 +5206,7 @@ function openSubtitleEditor(focusIdx = -1, seekSec = null) {
     renderSubtitleEditor();
     if (seekSec !== null && Number.isFinite(seekSec)) {
         const v = document.getElementById("baseVideo");
-        try { v.currentTime = Math.max(0, seekSec); } catch(_) {}
+        try { v.currentTime = Math.max(0, seekSec); } catch(_) { console.error(_); }
     }
     if (focusIdx >= 0) {
         setTimeout(() => {
@@ -5295,7 +5310,7 @@ document.getElementById("btnRestoreAll")?.addEventListener("click", async () => 
             const form = new FormData();
             const res = await fetch(`/api/jobs/${currentJobId}/subtitle/restore`, {method: "POST", body: form});
             if (res.ok) await loadSubtitleEditor();
-        } catch(e) {}
+        } catch(e) { console.error(e); }
     }
 });
 
@@ -5305,7 +5320,7 @@ document.getElementById("btnToggleSubtitle")?.addEventListener("click", async ()
         form.append("mode", subMeta.subtitle_enabled ? "none" : (subMeta.subtitle_mode || "auto"));
         const res = await fetch(`/api/jobs/${currentJobId}/subtitle/mode`, {method: "POST", body: form});
         if (res.ok) await loadSubtitleEditor();
-    } catch(e) {}
+    } catch(e) { console.error(e); }
 });
 
 document.getElementById("replaceSrtInput")?.addEventListener("change", async (e) => {
