@@ -1026,6 +1026,7 @@ input[type=range]{
                         <span id="driveStatusBadge" class="badge bg-secondary">Checking...</span>
                     </div>
                     <small id="driveStatusText" style="display:block; margin-top:4px;">Session mới cần cấp lại quyền Drive.</small>
+                    <small id="driveAuthError" style="display:none; margin-top:4px; color:#dc3545;"></small>
                     <button id="btnConnectDrive" class="primary" style="margin-top:8px; display:none; width: 100%; min-height: 44px;">
                         Kết nối Google Drive
                     </button>
@@ -1630,7 +1631,23 @@ input[type=range]{
                 ></video>
             </div>
 
+            <div id="previewContinueBox"
+                 class="actions"
+                 style="display:none; margin-top:16px;">
+
+                <button
+                    id="continueToFinal"
+                    type="button"
+                    class="primary"
+                    style="min-height:52px; width:100%;">
+                    TIẾP TỤC → RENDER FINAL
+                </button>
+
+            </div>
+
         </div>
+
+    </div>
 
 
     <div id="step4" class="step-panel" style="display:none;">
@@ -1723,6 +1740,8 @@ input[type=range]{
             </a>
 
         </div>
+
+    </div>
 
     </section>
 
@@ -2673,6 +2692,12 @@ document.getElementById("continueToPreview")?.addEventListener("click", async ()
 document.getElementById("backToCustomize")?.addEventListener("click", () => showStep(2));
 document.getElementById("backToPreview")?.addEventListener("click", () => showStep(3));
 
+document
+  .getElementById("continueToFinal")
+  ?.addEventListener("click", () => {
+      showStep(4);
+  });
+
 function validateStep2() {
     const musicMode = document.querySelector('input[name="musicMode"]:checked')?.value || "default";
     if (musicMode === "upload") {
@@ -2763,6 +2788,7 @@ async function refreshSubtitleRuntimeStatus() {
             if (data.oauth_url && authLink) {
                 if (linkContainer) linkContainer.style.display = "block";
                 authLink.href = data.oauth_url;
+                syncConfirmAuthButton(data);
             }
         } else {
             if (driveBadge) {
@@ -2774,6 +2800,7 @@ async function refreshSubtitleRuntimeStatus() {
             }
             if (btnConnect) btnConnect.style.display = "block";
             if (linkContainer) linkContainer.style.display = "none";
+            if (data.drive_auth_error) showDriveAuthError(data.drive_auth_error);
         }
     } catch (e) {
         console.error(e);
@@ -4599,6 +4626,22 @@ const previewVideo =
 const previewPlayerBox =
     document.getElementById("previewPlayerBox");
 
+const previewContinueBox =
+    document.getElementById("previewContinueBox");
+
+function setPreviewContinueVisible(visible) {
+    if (!previewContinueBox) {
+        return;
+    }
+
+    previewContinueBox.style.display =
+        visible ? "block" : "none";
+}
+
+function hidePreviewContinue() {
+    setPreviewContinueVisible(false);
+}
+
 const previewStale =
     document.getElementById("previewStale");
 
@@ -4787,6 +4830,7 @@ async function pollPreview(jobId) {
                 if (data.stale) {
                     previewPlayerBox.style.display =
                         "none";
+                    hidePreviewContinue();
                     previewStale.style.display =
                         "block";
                     previewStatus.textContent =
@@ -4798,6 +4842,7 @@ async function pollPreview(jobId) {
 
                     previewPlayerBox.style.display =
                         "block";
+                    setPreviewContinueVisible(true);
                     previewStale.style.display =
                         "none";
                     previewStatus.textContent =
@@ -4820,12 +4865,14 @@ async function pollPreview(jobId) {
             if (data.status === "cancelled") {
                 previewBar.style.width = "0%";
                 previewPlayerBox.style.display = "none";
+                hidePreviewContinue();
                 previewStatus.textContent = "Đã hủy preview.";
                 setPreviewBusy(false);
                 previewPolling = false;
                 return;
             }
 
+            hidePreviewContinue();
             previewStatus.textContent =
                 `${data.message || "Đang render preview..."} ${detail}`;
 
@@ -4833,6 +4880,7 @@ async function pollPreview(jobId) {
         }
     } catch (error) {
         previewBar.style.width = "0%";
+        hidePreviewContinue();
         setPreviewBusy(false);
         previewPolling = false;
 
@@ -4877,6 +4925,7 @@ async function startPreview() {
 
     setPreviewBusy(true);
     previewPlayerBox.style.display = "none";
+    hidePreviewContinue();
     previewStale.style.display = "none";
     previewBar.style.width = "2%";
     previewStatus.textContent = "Đang chuẩn bị preview...";
@@ -4972,6 +5021,7 @@ async function refreshPreviewStatus() {
 
     if (!data || data.status === "none") {
         previewPlayerBox.style.display = "none";
+        hidePreviewContinue();
         previewStale.style.display = "none";
         previewStatus.textContent = "Chưa có preview.";
         previewBar.style.width = "0%";
@@ -4980,6 +5030,7 @@ async function refreshPreviewStatus() {
     }
 
     if (data.status === "processing") {
+        hidePreviewContinue();
         // Resume polling (e.g. page reloaded mid-render).
         pollPreview(currentJobId);
         return;
@@ -4991,6 +5042,7 @@ async function refreshPreviewStatus() {
             + `?v=${Date.now()}`;
 
         previewPlayerBox.style.display = "block";
+        setPreviewContinueVisible(true);
         previewStale.style.display = "none";
         previewStatus.textContent =
             `Preview sẵn sàng (${formatHMS(data.start_seconds)}`
@@ -5002,6 +5054,7 @@ async function refreshPreviewStatus() {
 
     if (data.status === "done" && data.stale) {
         previewPlayerBox.style.display = "none";
+        hidePreviewContinue();
         previewStale.style.display = "block";
         previewStatus.textContent =
             "Thiết lập đã thay đổi. Hãy render preview lại.";
@@ -5010,6 +5063,7 @@ async function refreshPreviewStatus() {
     }
 
     previewPlayerBox.style.display = "none";
+    hidePreviewContinue();
     previewStale.style.display = "none";
     previewStatus.textContent =
         data.status === "failed"
@@ -5097,32 +5151,74 @@ refreshSubtitleRuntimeStatus();
 
 let driveAuthInterval = null;
 
+function showDriveAuthError(msg) {
+    const box = document.getElementById("driveAuthError");
+    if (!box) return;
+    box.textContent = msg ? "Lỗi kết nối: " + msg : "";
+    box.style.display = msg ? "block" : "none";
+}
+
+// Each attempt has a new OAuth URL; confirming before opening *that* URL always fails.
+function driveAuthLinkOpened(url) {
+    try { return sessionStorage.getItem("driveAuthOpened") === url; } catch (e) { return false; }
+}
+
+function syncConfirmAuthButton(data) {
+    const btn = document.getElementById("btnConfirmAuth");
+    if (!btn) return;
+    btn.disabled = data.state !== "waiting_oauth" || !driveAuthLinkOpened(data.oauth_url);
+}
+
+document.getElementById("driveAuthLink")?.addEventListener("click", (e) => {
+    const url = e.currentTarget.href;
+    try { sessionStorage.setItem("driveAuthOpened", url); } catch (err) {}
+    const btn = document.getElementById("btnConfirmAuth");
+    if (btn) btn.disabled = false;
+});
+
+function startDriveAuthPolling() {
+    if (driveAuthInterval) clearInterval(driveAuthInterval);
+    driveAuthInterval = setInterval(pollDriveAuth, 2000);
+    pollDriveAuth();
+}
+
 async function pollDriveAuth() {
     try {
         const res = await fetch("/api/colab/drive/status");
         if (!res.ok) return;
         const data = await res.json();
-        
+
+        const colabBadge = document.getElementById("colabStatusBadge");
+        const colabText = document.getElementById("colabStatusText");
         const badge = document.getElementById("driveStatusBadge");
         const text = document.getElementById("driveStatusText");
         const btnConnect = document.getElementById("btnConnectDrive");
         const linkContainer = document.getElementById("driveAuthLinkContainer");
         const authLink = document.getElementById("driveAuthLink");
-        
+
+        if (colabBadge && data.colab_connected) {
+            colabBadge.textContent = "Connected";
+            colabBadge.className = "badge bg-success";
+            if (colabText) colabText.textContent = "Phiên Colab đã kết nối";
+        }
+
         if (data.drive_mounted) {
             badge.textContent = "Connected";
             badge.className = "badge bg-success";
             text.textContent = data.message || "Đã kết nối";
             btnConnect.style.display = "none";
             linkContainer.style.display = "none";
+            showDriveAuthError(null);
         } else if (data.auth_in_progress) {
             badge.textContent = "Waiting";
             badge.className = "badge bg-warning text-dark";
             text.textContent = data.message || "Đang chờ...";
             btnConnect.style.display = "none";
+            showDriveAuthError(null);
             if (data.oauth_url) {
                 linkContainer.style.display = "block";
                 authLink.href = data.oauth_url;
+                syncConfirmAuthButton(data);
             } else {
                 linkContainer.style.display = "none";
             }
@@ -5132,6 +5228,13 @@ async function pollDriveAuth() {
             text.textContent = data.message || "Cần kết nối Drive";
             btnConnect.style.display = "block";
             linkContainer.style.display = "none";
+            if (data.state === "failed") showDriveAuthError(data.error || data.message);
+        }
+
+        if (!data.auth_in_progress && driveAuthInterval) {
+            clearInterval(driveAuthInterval);
+            driveAuthInterval = null;
+            refreshSubtitleRuntimeStatus();
         }
     } catch(e) {
         console.error(e);
@@ -5139,35 +5242,43 @@ async function pollDriveAuth() {
 }
 
 document.getElementById("btnConnectDrive")?.addEventListener("click", async () => {
-    document.getElementById("btnConnectDrive").disabled = true;
+    const btn = document.getElementById("btnConnectDrive");
+    const label = "Kết nối Google Drive";
+    btn.disabled = true;
+    btn.textContent = "Đang tạo Colab...";
+    showDriveAuthError(null);
     try {
         const res = await fetch("/api/colab/drive/auth/start", {method: "POST"});
-        if (!res.ok) {
-            const data = await res.json().catch(()=>({}));
-            alert("Lỗi kết nối: " + (data.detail || res.statusText));
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) {
+            throw new Error(data.error || data.detail || ("HTTP " + res.status));
         }
-        refreshSubtitleRuntimeStatus();
+        startDriveAuthPolling();
     } catch(e) {
-        console.error(e);
-        alert("Lỗi kết nối Drive: " + e.message);
+        console.error("drive auth start failed", e);
+        showDriveAuthError(e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = label;
     }
-    document.getElementById("btnConnectDrive").disabled = false;
 });
 
 document.getElementById("btnConfirmAuth")?.addEventListener("click", async () => {
-    document.getElementById("btnConfirmAuth").disabled = true;
+    const btn = document.getElementById("btnConfirmAuth");
+    btn.disabled = true;
+    showDriveAuthError(null);
     try {
         const res = await fetch("/api/colab/drive/auth/confirm", {method: "POST"});
-        if (!res.ok) {
-            const data = await res.json().catch(()=>({}));
-            alert("Lỗi xác nhận: " + (data.detail || res.statusText));
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) {
+            throw new Error(data.error || data.detail || ("HTTP " + res.status));
         }
-        refreshSubtitleRuntimeStatus();
+        startDriveAuthPolling();
     } catch(e) {
-        console.error(e);
-        alert("Lỗi xác nhận Drive: " + e.message);
+        console.error("drive auth confirm failed", e);
+        showDriveAuthError(e.message);
+        btn.disabled = false;
     }
-    document.getElementById("btnConfirmAuth").disabled = false;
 });
 
 document.getElementById("btnCancelAuth")?.addEventListener("click", async () => {
@@ -8237,8 +8348,7 @@ def subtitle_status(
 @app.get("/api/colab/drive/status")
 def drive_status():
     from services.drive_auth_manager import auth_manager
-    auth_manager.check_status()
-    return auth_manager.get_status()
+    return auth_manager.check_status()
 
 @app.post("/api/colab/drive/auth/start")
 def drive_auth_start():
@@ -8263,7 +8373,21 @@ def model_status():
 
 @app.get("/api/subtitle/runtime-status")
 def subtitle_runtime_status():
-    return get_subtitle_runtime_status()
+    from services.drive_auth_manager import auth_manager
+    auth = auth_manager.get_status()
+    if auth["auth_in_progress"]:
+        # Don't run colab commands against the VM while drivemount owns it.
+        return {
+            **auth,
+            "colab_error": None,
+            "drive_error": None,
+            "ready_for_asr": False,
+        }
+    status = get_subtitle_runtime_status()
+    status["drive_auth_state"] = auth["state"]
+    if auth["state"] == "failed":
+        status["drive_auth_error"] = auth["error"]
+    return status
 
 
 @app.post("/api/models/install")
