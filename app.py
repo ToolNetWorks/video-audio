@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from services.audio_mix_service import (
     DEFAULT_BGM_PATH,
     MUSIC_MODES,
+    build_mix_command,
     build_mix_with_music_command,
     build_mix_without_music_command,
     estimated_music_loops,
@@ -3931,6 +3932,8 @@ function renderLogoOverlay() {
         const src = `/api/jobs/${currentJobId}/logo/file?v=${logoCurrentCacheBuster}`;
         const tempImg = new Image();
         tempImg.onload = () => { logoOverlayEl.src = src; };
+        tempImg.onerror = (e) => { console.error("LOGO_TEMP_IMG_ERROR", src, e); };
+        logoOverlayEl.onerror = (e) => { console.error("LOGO_OVERLAY_IMG_ERROR", src, e); };
         tempImg.src = src;
     }
 }
@@ -4290,7 +4293,12 @@ logoInput.addEventListener(
             const src = `/api/jobs/${currentJobId}/logo/file?v=${logoCurrentCacheBuster}`;
             const temp = new Image();
             temp.src = src;
-            await temp.decode().catch(()=>null);
+            try {
+                await temp.decode();
+            } catch (err) {
+                console.error("LOGO_DECODE_FAILED", src, err);
+                throw err;
+            }
             renderLogoOverlay();
         } catch (e) {
             alert(e.message || e);
@@ -6295,43 +6303,6 @@ def process_v1(
 # V2 — BACKGROUND MUSIC
 # ==========================================================
 
-def build_mix_command(
-    *,
-    base_video: Path,
-    background_music: Path | None,
-    output_path: Path,
-    duration: float,
-    base_volume: float,
-    music_volume: float,
-    encode_video: bool,
-    subtitle_path: Path | None = None,
-) -> list[str]:
-    """Backward-compatible dispatcher (see services.audio_mix_service).
-
-    background_music=None → render without music (no amix, no
-    extra input). Never builds "-i None".
-    """
-    if background_music is None:
-        return build_mix_without_music_command(
-            base_video=base_video,
-            output_path=output_path,
-            duration=duration,
-            base_volume=base_volume,
-            subtitle_path=subtitle_path,
-        )
-
-    return build_mix_with_music_command(
-        base_video=base_video,
-        background_music=background_music,
-        output_path=output_path,
-        duration=duration,
-        base_volume=base_volume,
-        music_volume=music_volume,
-        encode_video=encode_video,
-        subtitle_path=subtitle_path,
-    )
-
-
 def process_mix(
     job_id: str,
     background_music: Path | None = None,
@@ -7231,6 +7202,7 @@ def run_preview_job(
                 base_video,
             )
         )
+        print(f"render_logo={render_logo}")
 
         render_template: TemplateOverlay | None = (
             resolve_template(
@@ -7750,6 +7722,8 @@ def start_final_preview(
     music_mode:
         str = Form("default"),
 
+
+
     base_volume:
         float = Form(100),
 
@@ -7762,7 +7736,7 @@ def start_final_preview(
     preview_duration:
         float = Form(15),
 ):
-
+    print(f"FINAL_PREVIEW job_id={job_id}")
     job_dir = require_job_dir(job_id)
 
     base_video = job_dir / "output.mp4"
@@ -8254,6 +8228,7 @@ def upload_logo(
     job_id: str,
     logo: UploadFile = File(...),
 ):
+    print(f"LOGO_UPLOAD job_id={job_id}")
     job_dir = require_job_dir(job_id)
 
     if not (job_dir / "output.mp4").exists():
