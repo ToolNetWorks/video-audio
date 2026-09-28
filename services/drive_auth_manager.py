@@ -38,13 +38,13 @@ class DriveAuthManager:
         # Check colab sessions
         try:
             res = subprocess.run(["colab", "sessions"], capture_output=True, text=True, timeout=5)
-            if "[subtitle]" in res.stdout:
+            if f"[{COLAB_SESSION}]" in res.stdout:
                 self._update_state(colab_connected=True)
                 # Check if drive is mounted
                 script_path = "/tmp/check_drive.py"
                 with open(script_path, "w") as f:
                     f.write("import os; print('OK' if os.path.exists('/content/gdrive/MyDrive') else 'NO')")
-                check = subprocess.run(["colab", "exec", "-s", "subtitle", "-f", script_path], capture_output=True, text=True, timeout=10)
+                check = subprocess.run(["colab", "exec", "-s", COLAB_SESSION, "-f", script_path], capture_output=True, text=True, timeout=10)
                 if "OK" in check.stdout:
                     self._update_state(drive_mounted=True, auth_required=False, message="Google Drive đã kết nối", auth_in_progress=False, oauth_url=None)
                 else:

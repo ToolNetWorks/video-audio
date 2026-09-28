@@ -13,6 +13,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from services.subtitle_runtime_service import get_subtitle_runtime_status
+
 logger = logging.getLogger("subtitle-service")
 
 LOG_DIR = Path("/var/lib/loop-video-audio/logs")
@@ -117,20 +119,61 @@ def _colab_download(remote: str, local: Path) -> None:
     local.parent.mkdir(parents=True, exist_ok=True)
     _run_colab(["colab", "download", "-s", COLAB_SESSION, remote, str(local)], timeout=180)
 
+def _check_colab_session_or_fail(model: str) -> None:
+    status = get_subtitle_runtime_status(selected_model=model)
+    if not status.get("colab_connected"):
+        raise HTTPException(
+            503,
+            detail={
+                "code": "COLAB_SESSION_REQUIRED",
+                "message": "Phiên Colab chưa kết nối. Hãy kết nối Colab trước.",
+            },
+        )
+    if not status.get("drive_mounted"):
+        raise HTTPException(
+            503,
+            detail={
+                "code": "DRIVE_AUTH_REQUIRED",
+                "message": "Cần đăng nhập Google Drive.",
+                "oauth_url": None,
+            },
+        )
+    if status.get("selected_model") != "auto" and not status.get("model_on_drive"):
+        raise HTTPException(
+            503,
+            detail={
+                "code": "MODEL_NOT_FOUND",
+                "message": f"Model {status.get('selected_model')} chưa có trên Drive.",
+                "model": status.get("selected_model"),
+            },
+        )
+
+
 def start_subtitle_job(job_id: str, model: str) -> dict:
     job_dir = _validate_job_id(job_id)
     source_audio = _find_audio(job_dir)
     subtitle_dir = _get_subtitle_dir(job_dir)
     state_path = subtitle_dir / "state.json"
-    
+
+    _check_colab_session_or_fail(model)
+
     public_url = os.getenv("PUBLIC_BASE_URL")
+
+    # Try to load dynamic secure tunnel URL if available
+    tunnel_file = Path("/var/lib/loop-video-audio/public_url.txt")
+    if tunnel_file.exists():
+        try:
+            url = tunnel_file.read_text().strip()
+            if url.startswith("https://"):
+                public_url = url
+        except Exception:
+            pass
+
     if not public_url:
         raise HTTPException(500, "PUBLIC_BASE_URL không được cấu hình. Cần PUBLIC_BASE_URL để Colab có thể tải audio.")
-        
-    from services.drive_auth_manager import auth_manager
-    auth_manager.check_status()
-    if not auth_manager.state["drive_mounted"]:
-        raise HTTPException(status_code=400, detail={"code": "DRIVE_AUTH_REQUIRED"})
+
+    if public_url.startswith("http://") and "localhost" not in public_url and "127.0.0.1" not in public_url:
+        logger.warning(f"SECURITY WARNING: PUBLIC_BASE_URL is using plain HTTP ({public_url}). Audio and tokens may be intercepted.")
 
     if state_path.exists():
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -216,7 +259,21 @@ def _run_subtitle_job(job_id: str, model: str, source_audio: Path, audio_url: st
     started = time.time()
     try:
         set_state({"status": "preparing", "progress": 0.0, "message": "Đang chuẩn bị gửi lệnh sang Colab..."})
-        
+
+        colab_ok = False
+        for _ in range(2):
+            ret, stdout, _ = _run_colab(["colab", "sessions"], timeout=10)
+            if ret == 0 and f"[{COLAB_SESSION}]" in stdout:
+                colab_ok = True
+                break
+            _write_log(job_dir, "Colab session missing, creating...")
+            try:
+                subprocess.run(["colab", "new", "-s", COLAB_SESSION, "--gpu", "T4"], timeout=120, check=True)
+            except Exception as exc:
+                _write_log(job_dir, f"Create Colab session failed: {exc}")
+        if not colab_ok:
+            raise RuntimeError("Không thể kết nối Colab. Session bị thiếu hoặc không tạo được.")
+
         config = {
             "job_id": job_id,
             "audio_url": audio_url,
@@ -225,26 +282,46 @@ def _run_subtitle_job(job_id: str, model: str, source_audio: Path, audio_url: st
             "chunk_duration": 600,
             "overlap": 2
         }
-        
+
         runner_code = (Path(__file__).parent.parent / "colab" / "runner.py").read_text(encoding="utf-8")
         runner_path = subtitle_dir / "runner.py"
-        runner_code = f"CONFIG_JSON = '''{json.dumps(config)}'''\n" + runner_code
+
+        # Safely inject config using base64 to avoid quote escaping issues
+        import base64
+        b64_config = base64.b64encode(json.dumps(config).encode("utf-8")).decode("utf-8")
+        runner_code = f"import base64\nCONFIG_JSON = base64.b64decode('{b64_config}').decode('utf-8')\n" + runner_code
+
         runner_path.write_text(runner_code, encoding="utf-8")
-        
+
         _write_log(job_dir, "Executing colab runner for full ASR process...")
-        _run_colab(["colab", "exec", "-s", COLAB_SESSION, "-f", str(runner_path)], timeout=COLAB_TIMEOUT, job_dir=job_dir, state_updater=handle_progress)
-        
+        _run_colab(
+            ["colab", "exec", "-s", COLAB_SESSION, "-f", str(runner_path), "--timeout", str(min(COLAB_TIMEOUT, 3600))],
+            timeout=COLAB_TIMEOUT,
+            job_dir=job_dir,
+            state_updater=handle_progress,
+        )
+
         # Download result
         remote_srt = f"/content/loop-video-audio/{job_id}/subtitle.srt"
         local_srt = subtitle_dir / "subtitle.srt"
         _colab_download(remote_srt, local_srt)
-        
+
         if not local_srt.exists():
             raise RuntimeError("Không tìm thấy subtitle.srt sau khi Colab chạy xong.")
-            
+
+        srt_content = local_srt.read_text(encoding="utf-8")
+        try:
+            state_data = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+            expected_duration = state_data.get("audio_duration", 0.0)
+            if expected_duration <= 0:
+                expected_duration = float('inf')
+            validate_srt(srt_content, expected_duration)
+        except Exception as e:
+            raise RuntimeError(f"SRT Validation failed: {e}")
+
         from services.subtitle_editor_service import setup_subtitle_files
-        setup_subtitle_files(job_id, "generated", local_srt.read_text(encoding="utf-8"))
-            
+        setup_subtitle_files(job_id, "generated", srt_content)
+
         elapsed = time.time() - started
         set_state({
             "status": "done",
@@ -256,20 +333,41 @@ def _run_subtitle_job(job_id: str, model: str, source_audio: Path, audio_url: st
             "eta_text": "00:00:00",
         })
         _write_log(job_dir, "DONE")
-        
+
     except Exception as exc:
         elapsed = time.time() - started
         _write_log(job_dir, f"FAILED: {exc}")
-        set_state({
-            "status": "failed",
-            "progress": 0.0,
-            "message": "Tạo SRT thất bại.",
-            "error": str(exc),
-            "elapsed_seconds": round(elapsed, 1),
-            "elapsed_text": format_duration(elapsed),
-        })
+
+        current_state = {}
+        if state_path.exists():
+            try:
+                current_state = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        if current_state.get("status") != "cancelled":
+            message = "Tạo SRT thất bại."
+            if "Colab session" in str(exc) or "session" in str(exc).lower():
+                message = "Phiên Colab đã hết. Cần kết nối lại."
+            elif "Drive" in str(exc) or "drive" in str(exc).lower():
+                message = "Google Drive cần đăng nhập lại."
+            elif "Model" in str(exc) or "model" in str(exc).lower():
+                message = "Model chưa sẵn sàng trên Drive."
+            set_state({
+                "status": "failed",
+                "progress": 0.0,
+                "message": message,
+                "error": str(exc),
+                "elapsed_seconds": round(elapsed, 1),
+                "elapsed_text": format_duration(elapsed),
+            })
     finally:
         _revoke_token(token)
+        try:
+            if runner_path.exists():
+                runner_path.unlink()
+        except Exception:
+            pass
 
 
 def get_model_status() -> dict:
@@ -386,7 +484,7 @@ def cancel_subtitle_job(job_id: str) -> None:
     state = json.loads(state_path.read_text(encoding="utf-8"))
     status = state.get("status", "")
     
-    if status in ("done", "failed"):
+    if status in ("done", "failed", "cancelled"):
         raise HTTPException(400, f"Job đã hoàn tất (trạng thái: {status}), không thể hủy.")
         
     # revoke token
@@ -394,17 +492,81 @@ def cancel_subtitle_job(job_id: str) -> None:
     if token_hash:
         SUBTITLE_AUDIO_TOKENS.pop(token_hash, None)
         
-    state["status"] = "failed"
+    state["status"] = "cancelled"
     state["error"] = "Bị hủy bởi người dùng"
     state["message"] = "Bị hủy"
     _write_state(state_path, state)
     
     _write_log(job_dir, "JOB CANCELLED BY USER")
-    
-    # Try to stop colab session if needed, but since it's a runner process, 
-    # we can't easily kill the specific process without process IDs.
-    # We can restart the kernel via colab CLI as a way to abort execution.
+
+    # Signal Colab runner to abort by touching a cancel file
     try:
-        subprocess.run(["colab", "restart-kernel", "-s", COLAB_SESSION], timeout=30)
-    except Exception:
-        pass
+        remote_cancel_path = f"/content/loop-video-audio/{job_id}/cancel"
+        cancel_script = subtitle_dir / "cancel_colab.py"
+        cancel_script.write_text(
+            f"open('{remote_cancel_path}', 'w').close()\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["colab", "exec", "-s", COLAB_SESSION, "-f", str(cancel_script)],
+            timeout=60,
+        )
+        cancel_script.unlink(missing_ok=True)
+    except Exception as e:
+        logger.error(f"Failed to signal Colab cancel: {e}")
+import re
+
+def validate_srt(srt_content: str, expected_duration: float) -> bool:
+    if not srt_content.strip():
+        raise ValueError("SRT rỗng")
+        
+    blocks = srt_content.strip().replace("\r\n", "\n").split("\n\n")
+    expected_seq = 1
+    last_end = 0.0
+    
+    time_pat = re.compile(r"^(\d{2}):(\d{2}):(\d{2}),(\d{3})$")
+    
+    def parse_time(ts: str) -> float:
+        m = time_pat.match(ts)
+        if not m:
+            raise ValueError(f"Sai định dạng thời gian: {ts}")
+        h, m_str, s, ms = map(int, m.groups())
+        return h * 3600 + m_str * 60 + s + ms / 1000.0
+
+    for block in blocks:
+        lines = block.strip().split("\n")
+        if len(lines) < 3:
+            raise ValueError(f"Block SRT không đủ dòng: {block}")
+            
+        try:
+            seq = int(lines[0])
+        except ValueError:
+            raise ValueError(f"Sequence không hợp lệ: {lines[0]}")
+            
+        if seq != expected_seq:
+            raise ValueError(f"Sai thứ tự sequence: kỳ vọng {expected_seq}, nhận {seq}")
+        expected_seq += 1
+        
+        times = lines[1].split(" --> ")
+        if len(times) != 2:
+            raise ValueError(f"Dòng thời gian không hợp lệ: {lines[1]}")
+            
+        start = parse_time(times[0].strip())
+        end = parse_time(times[1].strip())
+        
+        if start < 0 or end < 0:
+            raise ValueError(f"Thời gian âm: {lines[1]}")
+            
+        if start >= end:
+            raise ValueError(f"Start >= End: {lines[1]}")
+            
+        if start < last_end - 0.5:
+            raise ValueError(f"Thời gian không tịnh tiến (chồng lấn quá lớn): {last_end} -> {start}")
+            
+        last_end = max(last_end, end)
+        
+    # Check max duration
+    if last_end > expected_duration + 30.0:
+        raise ValueError(f"Độ dài SRT ({last_end}s) vượt quá audio ({expected_duration}s) một cách vô lý")
+        
+    return True

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="edgeTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="edgeBottom" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.30"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e8c766"/>
+      <stop offset="0.5" stop-color="#b98a2e"/>
+      <stop offset="1" stop-color="#e8c766"/>
+    </linearGradient>
+  </defs>
+
+  <!-- transparent center: only edge shading + frame lines -->
+  <rect x="0" y="0" width="1920" height="130" fill="url(#edgeTop)"/>
+  <rect x="0" y="950" width="1920" height="130" fill="url(#edgeBottom)"/>
+
+  <!-- outer frame -->
+  <rect x="18" y="18" width="1884" height="1044" fill="none" stroke="url(#gold)" stroke-width="6" opacity="0.9"/>
+  <rect x="34" y="34" width="1852" height="1012" fill="none" stroke="#e8c766" stroke-width="2" opacity="0.55"/>
+
+  <!-- corner ornaments -->
+  <g fill="none" stroke="#e8c766" stroke-width="8" opacity="0.95">
+    <path d="M18 120 L18 18 L120 18"/>
+    <path d="M1800 18 L1902 18 L1902 120"/>
+    <path d="M18 960 L18 1062 L120 1062"/>
+    <path d="M1800 1062 L1902 1062 L1902 960"/>
+  </g>
+  <g fill="#e8c766" opacity="0.9">
+    <circle cx="18" cy="18" r="10"/>
+    <circle cx="1902" cy="18" r="10"/>
+    <circle cx="18" cy="1062" r="10"/>
+    <circle cx="1902" cy="1062" r="10"/>
+  </g>
+</svg>

@@ -59,49 +59,53 @@ def format_timestamp(seconds: float) -> str:
 
 def merge_chunks_and_create_srt(results_dir: Path, srt_path: Path):
     chunks = sorted(results_dir.glob("chunk_*.json"))
-    all_segments = []
+    raw_segments = []
     
     for chunk_file in chunks:
         data = json.loads(chunk_file.read_text(encoding="utf-8"))
         offset = data.get("offset", 0.0)
-        overlap = data.get("overlap", 0.0)
-        chunk_duration = data.get("duration", 0.0)
         segments = data.get("segments", [])
         
         for seg in segments:
-            start_global = offset + seg["start"]
-            end_global = offset + seg["end"]
-            
-            # Simple deduplication: if segment start is within overlap of previous chunk
-            # we just check if we already added something very similar.
-            # A more robust way is just discarding segments entirely in the overlap region
-            # if they duplicate the end of the previous chunk, but let's just do a basic text match
             text = seg["text"].strip()
             if not text:
                 continue
-                
-            is_dup = False
-            # Check last 5 segments for overlap
-            for prev in all_segments[-5:]:
-                # If times overlap and text is identical or substring
-                if start_global < prev["end"] + 1.0:
-                    if text in prev["text"] or prev["text"] in text:
-                        is_dup = True
-                        # Extend end time of previous segment
-                        prev["end"] = max(prev["end"], end_global)
-                        if len(text) > len(prev["text"]):
-                            prev["text"] = text
-                        break
+            raw_segments.append({
+                "start": offset + seg["start"],
+                "end": offset + seg["end"],
+                "text": text
+            })
             
-            if not is_dup:
-                all_segments.append({
-                    "start": start_global,
-                    "end": end_global,
-                    "text": text
-                })
+    # Sort purely by start time
+    raw_segments.sort(key=lambda x: x["start"])
     
-    # Sort just in case
-    all_segments.sort(key=lambda x: x["start"])
+    all_segments = []
+    latest_end = 0.0
+    
+    for seg in raw_segments:
+        start = seg["start"]
+        end = seg["end"]
+        
+        if start < latest_end:
+            overlap_duration = latest_end - start
+            seg_duration = end - start
+            
+            # If more than 40% overlaps with the previously accepted segment, skip it (duplicate)
+            if seg_duration <= 0 or (overlap_duration / seg_duration) > 0.4:
+                continue
+                
+            # Otherwise, just trim the start time to ensure monotonic non-overlapping SRT
+            start = latest_end
+            
+        if end <= start + 0.05:
+            continue
+            
+        all_segments.append({
+            "start": start,
+            "end": end,
+            "text": seg["text"]
+        })
+        latest_end = max(latest_end, end)
     
     with srt_path.open("w", encoding="utf-8") as f:
         for i, seg in enumerate(all_segments, 1):
@@ -247,6 +251,9 @@ def run_whisper(job_dir, input_audio, model_name, language, total_duration, chun
     processed_seconds = 0.0
     
     for chunk_index in range(total_chunks):
+        if (job_dir / "cancel").exists():
+            raise RuntimeError("JOB CANCELLED BY USER")
+            
         start_time = chunk_index * chunk_duration
         end_time = min(start_time + chunk_duration, total_duration)
         if start_time >= total_duration:
@@ -371,6 +378,17 @@ def main():
         run_sherpa_onnx(job_dir, input_audio, model_name, language, total_duration)
     else:
         run_whisper(job_dir, input_audio, model_name, language, total_duration, chunk_duration, overlap)
+        
+    # Cleanup heavy temp files
+    try:
+        import shutil
+        if input_audio.exists():
+            input_audio.unlink()
+        results_dir = job_dir / "results"
+        if results_dir.exists():
+            shutil.rmtree(results_dir, ignore_errors=True)
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     try:
