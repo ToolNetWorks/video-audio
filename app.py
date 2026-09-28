@@ -483,7 +483,64 @@ input[type=range]{
     user-select:none;
     -webkit-user-select:none;
     -webkit-user-drag:none;
+    -webkit-touch-callout:none;
     pointer-events:auto;
+}
+
+.logo-editing #baseVideo{
+    pointer-events:none !important;
+}
+.logo-editing #logoOverlay{
+    pointer-events:auto !important;
+    cursor:grab;
+    z-index:50 !important;
+}
+.logo-editing #logoOverlay:active{
+    cursor:grabbing;
+}
+
+#logoEditBar{
+    display:none;
+    background:#1a1a2e;
+    border:1px solid #4ade80;
+    border-radius:8px;
+    padding:10px 14px;
+    margin:10px 0;
+    text-align:center;
+    font-size:14px;
+    color:#e0e0e0;
+}
+#logoEditBar.active{
+    display:block;
+}
+#logoEditBar button{
+    margin-top:8px;
+    min-height:40px;
+    padding:6px 24px;
+    background:#4ade80;
+    color:#111;
+    border:none;
+    border-radius:6px;
+    font-weight:700;
+    cursor:pointer;
+    font-size:14px;
+}
+#logoEditBtn{
+    min-height:44px;
+    width:100%;
+    margin-top:10px;
+    background:#2563eb;
+    color:#fff;
+    border:none;
+    border-radius:6px;
+    font-weight:700;
+    font-size:14px;
+    cursor:pointer;
+    padding:10px;
+}
+#logoEditBtn:disabled{
+    opacity:0.4;
+    cursor:not-allowed;
 }
 
 @media(max-width:600px){
@@ -680,7 +737,7 @@ input[type=range]{
             preload="metadata"
         ></video>
         <div id="templateOverlay" style="display:none;"></div>
-        <img id="logoOverlay" style="display:none;" alt="">
+        <img id="logoOverlay" draggable="false" style="display:none;" alt="">
         <div id="customSubOverlay" style="display:none;"></div>
         </div>
 
@@ -1245,8 +1302,21 @@ input[type=range]{
                 </button>
             </div>
 
+            <button
+                id="logoEditBtn"
+                type="button"
+                disabled
+            >
+                ✋ Chỉnh vị trí logo
+            </button>
+
+            <div id="logoEditBar">
+                <div>📌 Đang chỉnh logo — kéo logo bằng tay để di chuyển.</div>
+                <button type="button" id="logoEditDone">✓ Xong</button>
+            </div>
+
             <div class="hint">
-                Kéo logo trực tiếp trên video để đổi vị trí.
+                Bấm "Chỉnh vị trí logo" rồi kéo trực tiếp trên video.
                 Pinch 2 ngón (hoặc slider) để đổi kích thước.
             </div>
 
@@ -3856,7 +3926,79 @@ let logoDrag = null;
 let logoMoved = false;
 const logoPointers = new Map();
 let logoPinchStart = null;
+let logoEditMode = false;
 
+const logoEditBtn = document.getElementById("logoEditBtn");
+const logoEditBar = document.getElementById("logoEditBar");
+const logoEditDone = document.getElementById("logoEditDone");
+
+
+function enterLogoEditMode() {
+    if (logoEditMode) return;
+    logoEditMode = true;
+
+    const wrapper = document.getElementById("videoPreviewWrapper");
+
+    // Pause video & disable native controls (iOS Safari steals touch)
+    baseVideo.pause();
+    baseVideo.controls = false;
+    baseVideo.removeAttribute("controls");
+    baseVideo.style.pointerEvents = "none";
+
+    // Enable logo interaction
+    if (logoOverlayEl) {
+        logoOverlayEl.style.pointerEvents = "auto";
+        logoOverlayEl.style.touchAction = "none";
+        logoOverlayEl.style.zIndex = "50";
+    }
+
+    wrapper.classList.add("logo-editing");
+
+    // UI updates
+    logoEditBtn.style.display = "none";
+    logoEditBar.classList.add("active");
+
+    console.log("[LOGO_EDIT] enterLogoEditMode");
+}
+
+
+function exitLogoEditMode() {
+    if (!logoEditMode) return;
+    logoEditMode = false;
+
+    const wrapper = document.getElementById("videoPreviewWrapper");
+
+    // Restore video controls
+    baseVideo.style.pointerEvents = "";
+    baseVideo.controls = true;
+    baseVideo.setAttribute("controls", "");
+
+    // Logo overlay stays visible but non-interactive
+    if (logoOverlayEl) {
+        logoOverlayEl.style.pointerEvents = "none";
+        logoOverlayEl.style.zIndex = "9";
+    }
+
+    wrapper.classList.remove("logo-editing");
+
+    // UI updates
+    logoEditBtn.style.display = "";
+    logoEditBar.classList.remove("active");
+
+    console.log("[LOGO_EDIT] exitLogoEditMode");
+}
+
+
+// Hook up buttons
+logoEditBtn?.addEventListener("click", () => {
+    if (logoCfg.enabled && logoCfg.uploaded) {
+        enterLogoEditMode();
+    }
+});
+
+logoEditDone?.addEventListener("click", () => {
+    exitLogoEditMode();
+});
 
 function logoVideoDims() {
     return {
@@ -3917,8 +4059,21 @@ function renderLogoOverlay() {
 
     const show = logoCfg.enabled && logoCfg.uploaded;
     logoOverlayEl.style.display = show ? "block" : "none";
-    logoOverlayEl.style.pointerEvents = show ? "auto" : "none";
-    if (!show) return;
+
+    // pointer-events: auto only in edit mode, otherwise none
+    logoOverlayEl.style.pointerEvents =
+        (show && logoEditMode) ? "auto" : "none";
+
+    // Enable/disable the edit button
+    if (logoEditBtn) {
+        logoEditBtn.disabled = !show;
+    }
+
+    if (!show) {
+        // Exit edit mode if logo was hidden
+        if (logoEditMode) exitLogoEditMode();
+        return;
+    }
 
     logoOverlayEl.style.left = (logoCfg.x_norm * 100) + "%";
     logoOverlayEl.style.top = (logoCfg.y_norm * 100) + "%";
@@ -4043,6 +4198,11 @@ function attachLogoGestures() {
     el.addEventListener(
         "pointerdown",
         (e) => {
+            console.log("[LOGO_EVENT] logoOverlay pointerdown",
+                "editMode=", logoEditMode,
+                "type=", e.pointerType,
+                "id=", e.pointerId);
+
             if (
                 !logoCfg.enabled ||
                 !logoCfg.uploaded
@@ -4050,7 +4210,12 @@ function attachLogoGestures() {
                 return;
             }
 
+            if (!logoEditMode) {
+                return;
+            }
+
             e.preventDefault();
+            e.stopPropagation();
 
             try {
                 el.setPointerCapture(e.pointerId);
@@ -4096,6 +4261,7 @@ function attachLogoGestures() {
             }
 
             e.preventDefault();
+            e.stopPropagation();
 
             logoPointers.set(e.pointerId, {
                 x: e.clientX,
@@ -4144,7 +4310,7 @@ function attachLogoGestures() {
                 logoDrag
             ) {
                 const rect =
-                    logoWrapper().getBoundingClientRect();
+                    document.getElementById("videoPreviewWrapper").getBoundingClientRect();
 
                 if (
                     rect.width <= 0 ||
@@ -4171,6 +4337,10 @@ function attachLogoGestures() {
     );
 
     const endPointer = (e) => {
+        console.log("[LOGO_EVENT] logoOverlay pointerup/cancel",
+            "type=", e.type,
+            "id=", e.pointerId);
+
         logoPointers.delete(e.pointerId);
 
         if (logoPointers.size < 2) {
@@ -4193,6 +4363,17 @@ function attachLogoGestures() {
 
     el.addEventListener("pointerup", endPointer);
     el.addEventListener("pointercancel", endPointer);
+
+    // Audit: log touch delivery on video & wrapper
+    baseVideo.addEventListener("pointerdown", (e) => {
+        console.log("[LOGO_EVENT] baseVideo pointerdown",
+            "type=", e.pointerType, "id=", e.pointerId);
+    });
+    document.getElementById("videoPreviewWrapper")
+        .addEventListener("pointerdown", (e) => {
+            console.log("[LOGO_EVENT] videoPreviewWrapper pointerdown",
+                "type=", e.pointerType, "id=", e.pointerId);
+        });
 }
 
 
@@ -4300,6 +4481,7 @@ logoInput.addEventListener(
                 throw err;
             }
             renderLogoOverlay();
+            enterLogoEditMode();
         } catch (e) {
             alert(e.message || e);
         }
@@ -4388,6 +4570,7 @@ document.getElementById("logoDelete")?.addEventListener(
         logoCfg.file_name = null;
         logoInput.value = "";
 
+        exitLogoEditMode();
         syncLogoControls();
         renderLogoOverlay();
     }
