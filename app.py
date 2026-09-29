@@ -33,6 +33,7 @@ from services.logo_service import (
     get_logo_dir,
     get_render_logo,
     load_logo_config,
+    probe_video_dims,
     save_logo_config,
     validate_logo_image,
 )
@@ -65,6 +66,20 @@ from services.template_service import (
     save_template_config,
     store_upload as store_template_upload,
     validate_template_upload,
+)
+
+from services.fast_final_service import (
+    DECORATED_LOOP_COPY,
+    FAST_COPY,
+    FULL_ENCODE,
+    build_decorated_loop_command,
+    build_loop_copy_final_command,
+    cache_paths,
+    decide_final_render_mode,
+    decorated_loop_cache_key,
+    get_short_source,
+    read_decorated_cache,
+    write_decorated_cache,
 )
 
 from services.job_lifecycle_service import (
@@ -2772,7 +2787,7 @@ async function refreshSubtitleRuntimeStatus() {
                 driveBadge.className = "badge bg-success";
             }
             if (driveText) {
-                driveText.textContent = data.drive_error || "Google Drive đã kết nối";
+                driveText.textContent = data.drive_message || data.drive_error || "Google Drive đã kết nối";
             }
             if (btnConnect) btnConnect.style.display = "none";
             if (linkContainer) linkContainer.style.display = "none";
@@ -6799,102 +6814,264 @@ def process_mix(
             state,
         )
 
-        if render_logo is not None:
-            stage_name = "Đang render logo"
-
-            command = (
-                build_final_with_logo_command(
-                    base_video=
-                        base_video,
-
-                    background_music=
-                        background_music
-                        if has_music
-                        else None,
-
-                    logo_path=
-                        render_logo.path,
-
-                    geometry=
-                        render_logo.geometry,
-
-                    output_path=
-                        final_video,
-
-                    duration=
-                        duration,
-
-                    base_volume=
-                        base_volume,
-
-                    music_volume=
-                        music_volume,
-
-                    subtitle_path=
-                        subtitle_path,
-
-                    template=
-                        render_template,
-                )
-            )
-        else:
-            if has_music:
-                stage_name = "Đang mix nhạc nền"
-            elif subtitle_path is not None:
-                stage_name = "Đang render phụ đề"
-            else:
-                stage_name = "Đang render final"
-
-            command = (
-                build_mix_command(
-                    base_video=
-                        base_video,
-
-                    background_music=
-                        background_music,
-
-                    output_path=
-                        final_video,
-
-                    duration=
-                        duration,
-
-                    base_volume=
-                        base_volume,
-
-                    music_volume=
-                        music_volume,
-
-                    encode_video=False,
-
-                    subtitle_path=
-                        subtitle_path,
-
-                    template=
-                        render_template,
-                )
-            )
-        
-        result = (
-            run_ffmpeg_progress(
-                command=command,
-
-                state_path=
-                    mix_state_path,
-
-                log_path=
-                    log_path,
-
-                duration=
-                    duration,
-
-                progress_start=15,
-                progress_end=98,
-
-                stage_name=
-                    stage_name,
-            )
+        # Smart render dispatcher: music never decides the video mode.
+        # FAST_COPY (no logo/template/subtitle) and DECORATED_LOOP_COPY
+        # (static logo/template, no subtitle burn) avoid re-encoding
+        # the full-length video. Subtitle burn always needs FULL_ENCODE.
+        render_mode = decide_final_render_mode(
+            has_logo=render_logo is not None,
+            has_template=render_template is not None,
+            has_subtitle=subtitle_path is not None,
         )
+
+        state = read_json(mix_state_path)
+        state.update({"render_mode": render_mode})
+        write_json(mix_state_path, state)
+
+        result: int | None = None
+
+        if render_mode == DECORATED_LOOP_COPY:
+            # FAST PATH: decorate the short upload source once, then
+            # loop-copy it to the full duration. Any problem falls
+            # back to the legacy full encode below (never fails the
+            # job outright because of the optimization path).
+            try:
+                source_video, source_duration = get_short_source(job_dir)
+                if source_video is None or source_duration is None:
+                    raise RuntimeError("SHORT_SOURCE_NOT_FOUND")
+
+                source_w, source_h = probe_video_dims(source_video)
+
+                cache_key = decorated_loop_cache_key(
+                    source_video=source_video,
+                    logo_path=(
+                        render_logo.path
+                        if render_logo is not None
+                        else None
+                    ),
+                    geometry=(
+                        render_logo.geometry
+                        if render_logo is not None
+                        else None
+                    ),
+                    template=render_template,
+                    video_width=source_w,
+                    video_height=source_h,
+                )
+
+                decorated_path = read_decorated_cache(job_dir, cache_key)
+
+                if decorated_path is None:
+                    decorated_path, _ = cache_paths(job_dir)
+                    decorated_path.parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    if decorated_path.exists():
+                        decorated_path.unlink()
+
+                    decorate_cmd = build_decorated_loop_command(
+                        source_video=source_video,
+                        source_duration=source_duration,
+                        logo_path=(
+                            render_logo.path
+                            if render_logo is not None
+                            else None
+                        ),
+                        geometry=(
+                            render_logo.geometry
+                            if render_logo is not None
+                            else None
+                        ),
+                        template=render_template,
+                        output_path=decorated_path,
+                    )
+
+                    decorate_rc = run_ffmpeg_progress(
+                        command=decorate_cmd,
+                        state_path=mix_state_path,
+                        log_path=log_path,
+                        duration=source_duration,
+                        progress_start=15,
+                        progress_end=30,
+                        stage_name="Đang chuẩn bị logo/template",
+                    )
+
+                    if decorate_rc != 0 or not decorated_path.exists():
+                        raise RuntimeError(
+                            ffmpeg_log_tail(log_path)
+                            or "FAST_PATH_FAILED decorate"
+                        )
+
+                    decorated_dur = probe_duration(decorated_path)
+                    if abs(decorated_dur - source_duration) > 1.0:
+                        raise RuntimeError(
+                            "FAST_PATH_FAILED bad loop duration"
+                        )
+
+                    write_decorated_cache(
+                        job_dir,
+                        cache_key,
+                        source_duration=source_duration,
+                    )
+
+                fast_cmd = build_loop_copy_final_command(
+                    loop_video=decorated_path,
+                    base_video=base_video,
+                    background_music=(
+                        background_music if has_music else None
+                    ),
+                    output_path=final_video,
+                    duration=duration,
+                    base_volume=base_volume,
+                    music_volume=music_volume,
+                )
+
+                result = run_ffmpeg_progress(
+                    command=fast_cmd,
+                    state_path=mix_state_path,
+                    log_path=log_path,
+                    duration=duration,
+                    progress_start=30,
+                    progress_end=98,
+                    stage_name="Đang ghép video nhanh",
+                )
+
+                if result != 0:
+                    raise RuntimeError(
+                        ffmpeg_log_tail(log_path)
+                        or "FAST_PATH_FAILED copy"
+                    )
+            except Exception as fast_exc:
+                with log_path.open(
+                    "a", encoding="utf-8", errors="replace"
+                ) as fast_log:
+                    fast_log.write(
+                        "\n[fast-final] FAST_PATH_FAILED"
+                        " -> FALLBACK_FULL_ENCODE: "
+                        f"{fast_exc}\n"
+                    )
+                try:
+                    if final_video.exists():
+                        final_video.unlink()
+                except OSError:
+                    pass
+                state = read_json(mix_state_path)
+                state.update({
+                    "progress": 15,
+                    "message": "Đang render full encode...",
+                    "render_mode": FULL_ENCODE,
+                    "fast_path_error": str(fast_exc),
+                })
+                write_json(mix_state_path, state)
+                render_mode = FULL_ENCODE
+                result = None
+
+        if result is None:
+            if render_logo is not None:
+                stage_name = (
+                    "Đang render full encode"
+                    if render_mode == FULL_ENCODE
+                    and subtitle_path is not None
+                    else "Đang render logo"
+                )
+
+                command = (
+                    build_final_with_logo_command(
+                        base_video=
+                            base_video,
+
+                        background_music=
+                            background_music
+                            if has_music
+                            else None,
+
+                        logo_path=
+                            render_logo.path,
+
+                        geometry=
+                            render_logo.geometry,
+
+                        output_path=
+                            final_video,
+
+                        duration=
+                            duration,
+
+                        base_volume=
+                            base_volume,
+
+                        music_volume=
+                            music_volume,
+
+                        subtitle_path=
+                            subtitle_path,
+
+                        template=
+                            render_template,
+                    )
+                )
+            else:
+                if render_mode == FAST_COPY:
+                    stage_name = "Đang ghép video nhanh"
+                elif has_music:
+                    stage_name = "Đang mix nhạc nền"
+                elif subtitle_path is not None:
+                    stage_name = "Đang render phụ đề"
+                else:
+                    stage_name = "Đang render final"
+
+                command = (
+                    build_mix_command(
+                        base_video=
+                            base_video,
+
+                        background_music=
+                            background_music,
+
+                        output_path=
+                            final_video,
+
+                        duration=
+                            duration,
+
+                        base_volume=
+                            base_volume,
+
+                        music_volume=
+                            music_volume,
+
+                        encode_video=(
+                            render_template is not None
+                        ),
+
+                        subtitle_path=
+                            subtitle_path,
+
+                        template=
+                            render_template,
+                    )
+                )
+
+            result = (
+                run_ffmpeg_progress(
+                    command=command,
+
+                    state_path=
+                        mix_state_path,
+
+                    log_path=
+                        log_path,
+
+                    duration=
+                        duration,
+
+                    progress_start=15,
+                    progress_end=98,
+
+                    stage_name=
+                        stage_name,
+                )
+            )
 
         if result != 0 and render_logo is None:
 
@@ -6941,6 +7118,9 @@ def process_mix(
 
                         subtitle_path=
                             subtitle_path,
+
+                        template=
+                            render_template,
                     )
                 )
             else:
@@ -6962,6 +7142,9 @@ def process_mix(
                             subtitle_path,
 
                         force_encode_video=True,
+
+                        template=
+                            render_template,
                     )
                 )
 
@@ -8384,7 +8567,12 @@ def subtitle_runtime_status():
             "ready_for_asr": False,
         }
     status = get_subtitle_runtime_status()
+    if status["drive_mounted"] and auth["state"] != "connected":
+        auth = auth_manager.check_status()  # e.g. after a restart: re-verify models once
     status["drive_auth_state"] = auth["state"]
+    status["drive_models"] = auth["models"]
+    if status["drive_mounted"] and auth["state"] == "connected":
+        status["drive_message"] = auth["message"]
     if auth["state"] == "failed":
         status["drive_auth_error"] = auth["error"]
     return status

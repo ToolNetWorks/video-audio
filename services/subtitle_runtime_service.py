@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 COLAB_SESSION = os.getenv("COLAB_SESSION", "subtitle")
-MODEL_DRIVE_DIR = "/content/gdrive/MyDrive/loop-video-audio/models"
+MODEL_DRIVE_DIR = "/content/drive/MyDrive/loop-video-audio/models"
 MODEL_LOCAL_DIR = "/content/models"
 COLAB_CHECK_TIMEOUT = 30
 
@@ -60,7 +60,7 @@ def check_colab_session() -> dict[str, Any]:
 def check_drive_mounted() -> dict[str, Any]:
     result = {
         "drive_mounted": False,
-        "drive_path": "/content/gdrive/MyDrive",
+        "drive_path": "/content/drive/MyDrive",
         "drive_error": None,
     }
 
@@ -71,7 +71,7 @@ def check_drive_mounted() -> dict[str, Any]:
 
     script_path = "/tmp/check_drive.py"
     try:
-        Path(script_path).write_text("import os; print('OK' if os.path.exists('/content/gdrive/MyDrive') else 'NO')", encoding="utf-8")
+        Path(script_path).write_text("import os; print('OK' if os.path.exists('/content/drive/MyDrive') else 'NO')", encoding="utf-8")
         ret, stdout, stderr = _run_colab(
             ["colab", "exec", "-s", COLAB_SESSION, "-f", script_path],
             timeout=COLAB_CHECK_TIMEOUT,

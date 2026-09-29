@@ -1,4 +1,5 @@
 import fcntl
+import json
 import os
 import pty
 import re
@@ -11,7 +12,13 @@ from urllib.parse import parse_qs, urlparse
 
 COLAB_SESSION = os.getenv("COLAB_SESSION", "subtitle")
 COLAB_GPU = os.getenv("COLAB_GPU", "T4")
-MOUNT_PATH = "/content/gdrive"
+MOUNT_PATH = "/content/drive"
+MODELS_DIR = f"{MOUNT_PATH}/MyDrive/loop-video-audio/models"
+DRIVE_MODELS = {
+    "gipformer": "gipformer1.5-68M-rnnt",
+    "zipformer": "zipformer-30M-RNNT-6000h",
+}
+VERIFY_MARKER = "DRIVE_VERIFY_JSON:"
 
 COLAB_NEW_TIMEOUT = 300
 SESSION_READY_TIMEOUT = 120
@@ -55,12 +62,37 @@ def session_ready():
     return code == 0 and f"[{COLAB_SESSION}]" in out and ("Status: IDLE" in out or "Status: BUSY" in out)
 
 
-def drive_mounted_on_vm():
-    script_path = "/tmp/check_drive.py"
+def verify_drive_on_vm():
+    """Check the mount and the models on the VM itself. `colab exec` exits 0 even when the
+    code raises, so only the printed marker line counts. Returns None if the check itself failed."""
+    script_path = "/tmp/verify_drive.py"
     with open(script_path, "w") as f:
-        f.write(f"import os; print('DRIVE_OK' if os.path.exists('{MOUNT_PATH}/MyDrive') else 'DRIVE_NO')")
+        f.write(
+            "import os, json\n"
+            f"models = {DRIVE_MODELS!r}\n"
+            f"print({VERIFY_MARKER!r} + json.dumps({{\n"
+            f"    'drive': os.path.isdir('{MOUNT_PATH}/MyDrive'),\n"
+            f"    'models': {{k: os.path.isdir(os.path.join('{MODELS_DIR}', v)) for k, v in models.items()}},\n"
+            "}))\n"
+        )
     code, out = _run(["colab", "exec", "-s", COLAB_SESSION, "-f", script_path], timeout=60)
-    return "DRIVE_OK" in out
+    for line in out.splitlines():
+        if line.startswith(VERIFY_MARKER):
+            return json.loads(line[len(VERIFY_MARKER):])
+    print(f"[drive_auth] verify failed rc={code}: {ANSI_RE.sub('', out).strip()[-300:]}", flush=True)
+    return None
+
+
+def reset_kernel():
+    """A drive.mount() whose auth never completes keeps the kernel busy for ~120s and every
+    `colab exec` queues behind it. Auth only runs while Drive is unmounted, so no job is lost."""
+    code, out = _run(["colab", "restart-kernel", "-s", COLAB_SESSION], timeout=60)
+    print(f"[drive_auth] restart-kernel rc={code}", flush=True)
+
+
+def _models_message(models):
+    parts = [f"{k.capitalize()}: {'Ready' if ok else 'Missing'}" for k, ok in models.items()]
+    return "Google Drive đã kết nối · " + " · ".join(parts)
 
 
 class DriveAuthManager:
@@ -75,6 +107,7 @@ class DriveAuthManager:
             "auth_required": True,
             "oauth_url": None,
             "mount_path": MOUNT_PATH,
+            "models": {k: False for k in DRIVE_MODELS},
             "colab_session": COLAB_SESSION,
             "message": "Google Drive chưa kết nối",
             "error": None,
@@ -98,6 +131,14 @@ class DriveAuthManager:
             message=message or f"Lỗi: {error}",
         )
 
+    def _apply_verify(self, result):
+        """Connected only when the VM really has MyDrive."""
+        if result and result["drive"]:
+            self._update_state(state="connected", colab_connected=True, drive_mounted=True, oauth_url=None,
+                               error=None, models=result["models"], message=_models_message(result["models"]))
+            return True
+        return False
+
     def is_active(self):
         with self.lock:
             return self.state["state"] in ACTIVE_STATES
@@ -111,14 +152,11 @@ class DriveAuthManager:
         if self.is_active():
             return self.get_status()
         colab_ok = session_exists()
-        drive_ok = colab_ok and drive_mounted_on_vm()
+        verify = verify_drive_on_vm() if colab_ok else None
         with self.lock:
             if self.state["state"] in ACTIVE_STATES:
                 return dict(self.state)
-            if drive_ok:
-                self._update_state(state="connected", colab_connected=True, drive_mounted=True,
-                                   oauth_url=None, error=None, message="Google Drive đã kết nối")
-            else:
+            if not self._apply_verify(verify):
                 keep_failed = self.state["state"] == "failed"
                 self._update_state(
                     state="failed" if keep_failed else "idle",
@@ -145,9 +183,8 @@ class DriveAuthManager:
         try:
             if not self._ensure_colab_session():
                 return
-            if drive_mounted_on_vm():
-                self._update_state(state="connected", drive_mounted=True, oauth_url=None,
-                                   message="Google Drive đã kết nối")
+            self._update_state(message="Đang kiểm tra Google Drive trên Colab...")
+            if self._apply_verify(verify_drive_on_vm()):
                 return
             for attempt in range(1, DRIVEMOUNT_ATTEMPTS + 1):
                 # drivemount intermittently dies with "Connection was lost"
@@ -194,6 +231,7 @@ class DriveAuthManager:
             started = time.time()
             phase = None
             logged = set()
+            propagate_error = None
             while True:
                 st = self.get_status()["state"]
                 if st not in ACTIVE_STATES:
@@ -233,6 +271,10 @@ class DriveAuthManager:
                         logged.add(marker)
                         line = next((l for l in buf.splitlines() if marker in l), marker)
                         print(f"[drive_auth] {ANSI_RE.sub('', line).strip()[:300]}", flush=True)
+                if "Error propagating" in buf and st == "mounting":
+                    line = next(l for l in ANSI_RE.sub("", buf).splitlines() if "Error propagating" in l)
+                    propagate_error = line.strip()[:200]
+                    break
                 if "Mounted at" in buf:
                     break
 
@@ -240,9 +282,12 @@ class DriveAuthManager:
             print(f"[drive_auth] drivemount ended rc={self.process.poll()} tail={buf.strip()[-1500:]!r}", flush=True)
             if not last_attempt and self.get_status()["state"] == "starting_drive_auth" and "Mounted at" not in buf:
                 return "retry"
-            if drive_mounted_on_vm():
-                self._update_state(state="connected", drive_mounted=True, colab_connected=True,
-                                   oauth_url=None, error=None, message="Google Drive đã kết nối")
+            if propagate_error:
+                self._fail(propagate_error, "Chưa cấp quyền Drive (hoặc sai tài khoản). Bấm Kết nối lại.")
+                return
+            self._update_state(message="Đang kiểm tra Google Drive trên Colab...")
+            if self._apply_verify(verify_drive_on_vm()):
+                pass
             elif self.is_active():
                 self._fail(buf.strip().splitlines()[-1] if buf.strip() else "drivemount kết thúc nhưng Drive chưa mount",
                            "Mount Google Drive thất bại")
@@ -258,6 +303,8 @@ class DriveAuthManager:
             except OSError:
                 pass
             self.master_fd = None
+            if "Intercepted Drive Auth" in buf and not self.get_status()["drive_mounted"]:
+                reset_kernel()
 
     @staticmethod
     def _drain(fd):
