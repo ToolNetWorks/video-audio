@@ -189,6 +189,14 @@ HTML = r"""
 <title>Loop Video + Audio</title>
 
 <style>
+@font-face{
+    font-family:"Montserrat SemiBold";
+    src:url("/assets/fonts/Montserrat-SemiBold.ttf") format("truetype");
+    font-weight:600;
+    font-style:normal;
+    font-display:swap;
+}
+
 *{
     box-sizing:border-box;
 }
@@ -5389,6 +5397,13 @@ function reloadVideoTrack() {
 }
 
 function renderCustomOverlay(text) {
+    // Preview parity with ASS master
+    // (subtitle_montserrat_white_outline.ass @1920x1080):
+    // fontsize 62, top-center (alignment 8), MarginV 45,
+    // white + black outline 4 + shadow 1, no background, 1 line.
+    const SUB_FONT_PX = 62;
+    const SUB_REF_W = 1920;
+    const SUB_TOP_PCT = (45 / 1080 * 100).toFixed(4);
     let overlay = document.getElementById("customSubOverlay");
     if (!overlay) {
         const v = document.getElementById("baseVideo");
@@ -5396,24 +5411,39 @@ function renderCustomOverlay(text) {
 
         overlay = document.createElement("div");
         overlay.id = "customSubOverlay";
+        wrap.style.position = "relative";
+        wrap.appendChild(overlay);
+    }
+    // Master style, applied on every render (the element may
+    // pre-exist from the static HTML with no styling).
+    {
         overlay.style.position = "absolute";
-        overlay.style.bottom = "10%";
+        overlay.style.top = SUB_TOP_PCT + "%";
+        overlay.style.bottom = "auto";
         overlay.style.left = "0";
         overlay.style.width = "100%";
         overlay.style.textAlign = "center";
         overlay.style.whiteSpace = "nowrap";
+        overlay.style.overflow = "hidden";
         overlay.style.color = "white";
-        overlay.style.textShadow = "2px 2px 4px #000, -2px -2px 4px #000, 2px -2px 4px #000, -2px 2px 4px #000";
-        overlay.style.fontSize = "24px";
-        overlay.style.fontWeight = "bold";
+        overlay.style.background = "transparent";
+        overlay.style.fontFamily = '"Montserrat SemiBold", Montserrat, sans-serif';
+        overlay.style.fontWeight = "600";
+        overlay.style.textShadow =
+            "0.065em 0 0 #000, -0.065em 0 0 #000, "
+            + "0 0.065em 0 #000, 0 -0.065em 0 #000, "
+            + "0.046em 0.046em 0 #000, -0.046em -0.046em 0 #000, "
+            + "0.046em -0.046em 0 #000, -0.046em 0.046em 0 #000, "
+            + "0.02em 0.02em 2px rgba(0,0,0,0.9)";
         overlay.style.pointerEvents = "auto";
         overlay.style.cursor = "pointer";
         overlay.style.zIndex = "10";
         overlay.style.padding = "0 20px";
         overlay.style.boxSizing = "border-box";
-        wrap.style.position = "relative";
-        wrap.appendChild(overlay);
+    }
         
+    if (!overlay.dataset.bound) {
+        overlay.dataset.bound = "1";
         overlay.addEventListener("click", () => {
             if (activeCueIndex >= 0) {
                 const v = document.getElementById("baseVideo");
@@ -5423,8 +5453,23 @@ function renderCustomOverlay(text) {
             }
         });
     }
+    const wrap = document.getElementById("videoPreviewWrapper");
+    if (wrap && wrap.clientWidth > 0) {
+        overlay.style.fontSize =
+            Math.max(10, wrap.clientWidth * SUB_FONT_PX / SUB_REF_W) + "px";
+    }
     overlay.innerHTML = text.replace(/\n/g, "<br>");
 }
+
+window.addEventListener("resize", () => {
+    const overlay = document.getElementById("customSubOverlay");
+    const wrap = document.getElementById("videoPreviewWrapper");
+    if (overlay && wrap && wrap.clientWidth > 0
+        && overlay.style.display !== "none") {
+        overlay.style.fontSize =
+            Math.max(10, wrap.clientWidth * 62 / 1920) + "px";
+    }
+});
 
 function renderSubtitleEditor() {
     const container = document.getElementById("subEntriesContainer");
@@ -7313,6 +7358,35 @@ def health():
         "version":
             "2.0",
     }
+
+
+@app.get("/assets/fonts/Montserrat-SemiBold.ttf")
+def serve_subtitle_font():
+    """Serve the bundled Montserrat SemiBold for preview @font-face."""
+    from pathlib import Path as _Path
+
+    path = (
+        _Path(__file__).resolve().parent
+        / "assets"
+        / "fonts"
+        / "Montserrat-SemiBold.ttf"
+    )
+
+    if not path.exists():
+        raise HTTPException(
+            404,
+            "Font không tồn tại",
+        )
+
+    return FileResponse(
+        str(path),
+        media_type="font/ttf",
+        filename="Montserrat-SemiBold.ttf",
+        headers={
+            "Cache-Control":
+                "public, max-age=86400",
+        },
+    )
 
 
 @app.post("/api/render")

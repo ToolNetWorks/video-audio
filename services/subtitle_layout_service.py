@@ -13,8 +13,8 @@ Rules:
 - A long cue is split into N sequential children that exactly cover
   the original [start, end): child[0].start == original.start,
   child[-1].end == original.end, child[i].end == child[i+1].start.
-- Width is measured with real font metrics (DejaVu Sans 48, the same
-  font/size used by render.ass), never by character count.
+- Width is measured with real font metrics (Montserrat SemiBold 48,
+  the same font/size used by render.ass), never by character count.
 - Fixed font size: long cues are SPLIT, not shrunk.
 - Child durations are weighted by non-whitespace text length and
   rounded so the sum exactly equals the original duration.
@@ -26,23 +26,33 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 
 # ----------------------------------------------------------
 # Style config (single source of truth for preview AND final)
 # ----------------------------------------------------------
 
+# Default production font (bundled in-repo; also installed to
+# fontconfig so FFmpeg libass can resolve it at burn time).
+_DEFAULT_FONT_PATH = str(
+    Path(__file__).resolve().parent.parent
+    / "assets"
+    / "fonts"
+    / "Montserrat-SemiBold.ttf"
+)
+
 @dataclass(frozen=True)
 class SubtitleStyleConfig:
-    font_path: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    font_name: str = "DejaVu Sans"
-    font_size: int = 48  # fixed; split is preferred over shrink
+    font_path: str = _DEFAULT_FONT_PATH
+    font_name: str = "Montserrat SemiBold"
+    font_size: int = 62  # from ASS master Default style
     canvas_width: int = 1920
     canvas_height: int = 1080
-    margin_left: int = 130
-    margin_right: int = 158
-    margin_vertical: int = 53  # 1080 - 1027 (bottom of safe zone)
-    alignment: int = 2  # bottom-center
+    margin_left: int = 120  # from ASS master MarginL
+    margin_right: int = 120  # from ASS master MarginR
+    margin_vertical: int = 45  # from ASS master MarginV
+    alignment: int = 8  # from ASS master (top-center)
     min_fragment_ms: int = 400
 
     @property
@@ -450,41 +460,23 @@ def render_ass_string(
 ) -> str:
     """Render an ASS document from flat fragment dicts.
 
-    Each fragment needs start_ms/end_ms/text. Shared style with
-    generate_render_ass so preview and final always match.
+    Header and Default style always come from the master ASS file
+    (services.subtitle_style_service); only Dialogue lines are
+    generated here. Fragments are single-line by construction.
     """
-    header = (
-        "[Script Info]\n"
-        "ScriptType: v4.00+\n"
-        f"PlayResX: {config.canvas_width}\n"
-        f"PlayResY: {config.canvas_height}\n"
-        "WrapStyle: 2\n"
-        "\n"
-        "[V4+ Styles]\n"
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
-        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
-        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{config.font_name},{config.font_size},"
-        "&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
-        "0,0,0,0,100,100,0,0,1,2,0,2,"
-        f"{config.margin_left},{config.margin_right},{config.margin_vertical},1\n"
-        "\n"
-        "[Events]\n"
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
-        "Effect, Text"
-    )
-    lines = [header]
+    from services.subtitle_style_service import build_render_ass
+
+    dialogues = []
     for frag in fragments or []:
         # Fragments are single-line by construction; strip any
         # stray newline markers defensively (never hide content).
         text = normalize_single_line(frag.get("text", ""))
-        lines.append(
+        dialogues.append(
             f"Dialogue: 0,{_ms_to_ass(frag['start_ms'])},"
             f"{_ms_to_ass(frag['end_ms'])},"
             f"Default,,0,0,0,,{text}"
         )
-    return "\n".join(lines)
+    return build_render_ass(dialogues)
 
 
 def generate_render_ass(

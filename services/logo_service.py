@@ -411,8 +411,8 @@ def build_final_with_logo_command(
     from services.audio_mix_service import (
         _seek_args,
         _threads_args,
-        escape_subtitle_filter_path,
         music_filter_chain,
+        subtitle_filter_arg,
     )
 
     has_music = background_music is not None
@@ -424,9 +424,7 @@ def build_final_with_logo_command(
 
     subtitle_filter = None
     if subtitle_path is not None:
-        subtitle_filter = (
-            f"subtitles={escape_subtitle_filter_path(subtitle_path)}"
-        )
+        subtitle_filter = subtitle_filter_arg(subtitle_path)
 
     base_gain = base_volume / 100.0
 

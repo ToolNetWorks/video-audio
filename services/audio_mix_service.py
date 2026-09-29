@@ -112,6 +112,21 @@ def escape_subtitle_filter_path(path: Path) -> str:
     return f"'{text}'"
 
 
+def subtitle_filter_arg(subtitle_path: Path) -> str:
+    """Full `subtitles=` filter value with explicit fontsdir.
+
+    libass is pointed at the bundled fonts dir
+    (assets/fonts/Montserrat-SemiBold.ttf) so burns never depend
+    on whatever the VPS happens to have installed via fontconfig.
+    """
+    from services.subtitle_style_service import FONTS_DIR
+
+    return (
+        f"subtitles={escape_subtitle_filter_path(subtitle_path)}"
+        f":fontsdir={escape_subtitle_filter_path(FONTS_DIR)}"
+    )
+
+
 def music_filter_chain(
     base_volume: float,
     music_volume: float,
@@ -248,7 +263,7 @@ def build_mix_with_music_command(
         if subtitle_path is not None:
             command += [
                 "-vf",
-                f"subtitles={escape_subtitle_filter_path(subtitle_path)}",
+                subtitle_filter_arg(subtitle_path),
             ]
             # Burn subtitle bắt buộc encode lại video.
             encode_video = True
@@ -268,8 +283,8 @@ def build_mix_with_music_command(
         if subtitle_path is not None:
             video_chain = (
                 tchain + "[t];[t]"
-                f"subtitles={escape_subtitle_filter_path(subtitle_path)}"
-                "[vout]"
+                + subtitle_filter_arg(subtitle_path)
+                + "[vout]"
             )
             video_out = "[vout]"
             # Burn subtitle bắt buộc encode lại video.
@@ -349,7 +364,7 @@ def build_mix_without_music_command(
         if subtitle_path is not None:
             command += [
                 "-vf",
-                f"subtitles={escape_subtitle_filter_path(subtitle_path)}",
+                subtitle_filter_arg(subtitle_path),
             ]
 
         command += _video_codec_args(needs_encode)
@@ -394,8 +409,8 @@ def build_mix_without_music_command(
     if subtitle_path is not None:
         video_chain = (
             tchain + "[t];[t]"
-            f"subtitles={escape_subtitle_filter_path(subtitle_path)}"
-            "[vout]"
+            + subtitle_filter_arg(subtitle_path)
+            + "[vout]"
         )
         video_out = "[vout]"
     else:

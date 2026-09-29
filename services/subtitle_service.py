@@ -8,6 +8,7 @@ import secrets
 import subprocess
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -113,6 +114,34 @@ def _run_colab(args: list[str], timeout: int, job_dir: Path = None, state_update
         raise RuntimeError("Quá thời gian thực thi lệnh Colab") from exc
     except FileNotFoundError as exc:
         raise RuntimeError("Không tìm thấy lệnh `colab` trên VPS.") from exc
+
+def _run_colab_capture(args: list[str], timeout: int) -> tuple[int, str, str]:
+    """Capture-output variant for commands whose output must be parsed.
+
+    Used for e.g. `colab sessions` where the caller needs
+    (returncode, stdout, stderr). Never use the streaming `_run_colab`
+    where unpacking is required (it returns None by design).
+    """
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return (
+            result.returncode,
+            result.stdout or "",
+            result.stderr or "",
+        )
+    except subprocess.TimeoutExpired:
+        return -1, "", "timeout"
+    except FileNotFoundError:
+        return -2, "", "colab_not_found"
+    except Exception as exc:
+        return -3, "", str(exc)
 
 def _colab_download(remote: str, local: Path) -> None:
     logger.info("colab download: %s -> %s", remote, local.name)
@@ -262,7 +291,7 @@ def _run_subtitle_job(job_id: str, model: str, source_audio: Path, audio_url: st
 
         colab_ok = False
         for _ in range(2):
-            ret, stdout, _ = _run_colab(["colab", "sessions"], timeout=10)
+            ret, stdout, _err = _run_colab_capture(["colab", "sessions"], timeout=10)
             if ret == 0 and f"[{COLAB_SESSION}]" in stdout:
                 colab_ok = True
                 break
@@ -336,7 +365,7 @@ def _run_subtitle_job(job_id: str, model: str, source_audio: Path, audio_url: st
 
     except Exception as exc:
         elapsed = time.time() - started
-        _write_log(job_dir, f"FAILED: {exc}")
+        _write_log(job_dir, f"FAILED: {exc}\n{traceback.format_exc()}")
 
         current_state = {}
         if state_path.exists():
